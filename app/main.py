@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import openai
+from openai import OpenAI
 import os
 
 
@@ -16,8 +16,8 @@ app.add_middleware(
 )
 
 
-# OpenAI API key from Render environment
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# OpenAI v1 client using API key from environment (Render sets this)
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 class ChatIn(BaseModel):
@@ -31,15 +31,22 @@ def root():
 
 @app.post("/chat")
 def chat(data: ChatIn):
+    try:
+        response = client.chat.completions.create(
+            model="gpt-5-mini",
+            messages=[
+                {"role": "system", "content": "Reply briefly."},
+                {"role": "user", "content": data.message},
+            ],
+        )
 
-    response = openai.ChatCompletion.create(
-        model="gpt-5-mini",
-        messages=[
-            {"role": "system", "content": "Reply briefly."},
-            {"role": "user", "content": data.message},
-        ],
-    )
+        # response structure may be attribute-accessible or dict-like; handle both
+        choice = response.choices[0] if hasattr(response, "choices") else response["choices"][0]
+        if hasattr(choice, "message") and hasattr(choice.message, "content"):
+            reply = choice.message.content
+        else:
+            reply = choice["message"]["content"]
 
-    reply = response["choices"][0]["message"]["content"]
-
-    return {"reply": reply}
+        return {"reply": reply}
+    except Exception as e:
+        return {"error": str(e)}
