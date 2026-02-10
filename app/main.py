@@ -35,6 +35,9 @@ RAG_CHUNKS = None
 RAG_ERROR = None
 MEMORIES = None
 
+# In-memory conversation history per session
+CONVERSATION_HISTORY = {}
+
 
 @app.on_event("startup")
 def _load_rag_assets():
@@ -149,6 +152,7 @@ def _trim_chunk_for_prompt(chunk: str, max_lines: int = 4) -> str:
 
 class ChatIn(BaseModel):
     message: str
+    session_id: str = "default"
 
 
 @app.get("/")
@@ -159,6 +163,9 @@ def root():
 @app.post("/chat")
 def chat(data: ChatIn):
     try:
+        # Retrieve conversation history for this session
+        session_history = CONVERSATION_HISTORY.get(data.session_id, [])
+        
         examples = []
         try:
             examples = _retrieve_top_chunks(data.message, k=2)
@@ -203,12 +210,14 @@ def chat(data: ChatIn):
                 f"{joined}"
             )
 
+        # Build messages list: system prompt + history + current message
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(session_history)  # Inject conversation history
+        messages.append({"role": "user", "content": data.message})
+        
         response = client.chat.completions.create(
             model="gpt-5-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": data.message},
-            ],
+            messages=messages,
             temperature=0.3,
         )
 
@@ -218,6 +227,16 @@ def chat(data: ChatIn):
             reply = choice.message.content
         else:
             reply = choice["message"]["content"]
+        
+        # Update conversation history with user message and assistant reply
+        session_history.append({"role": "user", "content": data.message})
+        session_history.append({"role": "assistant", "content": reply})
+        
+        # Keep only last 6 messages (3 exchanges)
+        if len(session_history) > 6:
+            session_history = session_history[-6:]
+        
+        CONVERSATION_HISTORY[data.session_id] = session_history
 
         return {"reply": reply}
     except Exception as e:
