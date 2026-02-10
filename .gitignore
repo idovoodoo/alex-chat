@@ -1,0 +1,21 @@
+# Dependency directories
+node_modules/
+
+# Python
+venv/
+__pycache__/
+*.py[cod]
+
+# Environment
+.env
+.env.*
+
+# Editor directories
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+
+# Logs
+*.log
