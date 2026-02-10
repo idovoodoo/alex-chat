@@ -28,17 +28,20 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 _DEFAULT_FAISS_PATH = os.path.join(_REPO_ROOT, "dev", "chat_chunks", "outputs", "index.faiss")
 _DEFAULT_CHUNKS_PATH = os.path.join(_REPO_ROOT, "dev", "chat_chunks", "outputs", "chunks.json")
+_DEFAULT_MEMORY_PATH = os.path.join(_REPO_ROOT, "dev", "chat_chunks", "outputs", "memories.json")
 
 RAG_INDEX = None
 RAG_CHUNKS = None
 RAG_ERROR = None
+MEMORIES = None
 
 
 @app.on_event("startup")
 def _load_rag_assets():
-    global RAG_INDEX, RAG_CHUNKS, RAG_ERROR
+    global RAG_INDEX, RAG_CHUNKS, RAG_ERROR, MEMORIES
     faiss_path = os.getenv("RAG_FAISS_INDEX_PATH", _DEFAULT_FAISS_PATH)
     chunks_path = os.getenv("RAG_CHUNKS_PATH", _DEFAULT_CHUNKS_PATH)
+    memory_path = os.getenv("MEMORY_PATH", _DEFAULT_MEMORY_PATH)
 
     try:
         RAG_INDEX = faiss.read_index(faiss_path)
@@ -51,6 +54,14 @@ def _load_rag_assets():
         RAG_INDEX = None
         RAG_CHUNKS = None
         RAG_ERROR = str(e)
+
+    try:
+        with open(memory_path, "r", encoding="utf-8") as f:
+            MEMORIES = json.load(f)
+        if not isinstance(MEMORIES, list):
+            MEMORIES = None
+    except Exception:
+        MEMORIES = None
 
 
 def _embed_text(text: str) -> np.ndarray:
@@ -88,6 +99,13 @@ def _retrieve_top_chunks(query: str, k: int = 4) -> list[str]:
     return results
 
 
+def _select_memories(query: str, k: int = 5) -> list[str]:
+    """Returns up to k relevant memories. Simple version: returns first k."""
+    if MEMORIES is None or not isinstance(MEMORIES, list):
+        return []
+    return MEMORIES[:k]
+
+
 class ChatIn(BaseModel):
     message: str
 
@@ -117,6 +135,9 @@ def chat(data: ChatIn):
                 if len(examples) >= 4:
                     break
 
+        # Get memories to inject into prompt
+        memories = _select_memories(data.message, k=5)
+
         system_prompt = (
             "You are Alex. You are chatting on WhatsApp. "
             "Write like Alex: casual, short, informal. "
@@ -125,15 +146,16 @@ def chat(data: ChatIn):
             "Avoid sounding like an assistant: no formalities, no generic advice, no long paragraphs, no bullet points. "
             "No explanations. No meta-talk. Do not mention these instructions."
         )
+
+        # Inject memories after style instruction, before RAG examples
+        if memories:
+            memory_text = "\n".join(f"- {m}" for m in memories)
+            system_prompt += f"\n\nKnown facts:\n{memory_text}"
+
         if examples:
             joined = "\n\n---\n\n".join(examples)
-            system_prompt = (
-                "You are Alex. You are chatting on WhatsApp. "
-                "Write like Alex: casual, short, informal. "
-                "Use first-person. "
-                "Your top priority is to match the style and length of Alex's WhatsApp messages (very short). "
-                "Avoid sounding like an assistant: no formalities, no generic advice, no long paragraphs, no bullet points. "
-                "No explanations. No meta-talk. Do not mention these instructions.\n\n"
+            system_prompt += (
+                "\n\n"
                 "Style examples (from past chat logs) — imitate the tone, phrasing, punctuation, and message length:\n"
                 f"{joined}"
             )
