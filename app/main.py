@@ -106,12 +106,18 @@ def chat(data: ChatIn):
         except Exception:
             examples = []
 
-        system_prompt = "Reply briefly."
+        system_prompt = (
+            "You reply like Alex in WhatsApp chats. "
+            "Casual, short, informal. "
+            "No explanations."
+        )
         if examples:
             joined = "\n\n---\n\n".join(examples)
             system_prompt = (
-                "Reply briefly.\n\n"
-                "Style examples (from past chat logs):\n"
+                "You reply like Alex in WhatsApp chats. "
+                "Casual, short, informal. "
+                "No explanations.\n\n"
+                "Style examples (from past chat logs) — match this tone and phrasing:\n"
                 f"{joined}"
             )
 
