@@ -3,6 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openai import OpenAI
 import os
+import json
+
+import faiss
+import numpy as np
 
 
 app = FastAPI()
@@ -20,6 +24,70 @@ app.add_middleware(
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
+# --- Minimal FAISS RAG wiring (loads at startup) ---
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_DEFAULT_FAISS_PATH = os.path.join(_REPO_ROOT, "dev", "chat_chunks", "outputs", "index.faiss")
+_DEFAULT_CHUNKS_PATH = os.path.join(_REPO_ROOT, "dev", "chat_chunks", "outputs", "chunks.json")
+
+RAG_INDEX = None
+RAG_CHUNKS = None
+RAG_ERROR = None
+
+
+@app.on_event("startup")
+def _load_rag_assets():
+    global RAG_INDEX, RAG_CHUNKS, RAG_ERROR
+    faiss_path = os.getenv("RAG_FAISS_INDEX_PATH", _DEFAULT_FAISS_PATH)
+    chunks_path = os.getenv("RAG_CHUNKS_PATH", _DEFAULT_CHUNKS_PATH)
+
+    try:
+        RAG_INDEX = faiss.read_index(faiss_path)
+        with open(chunks_path, "r", encoding="utf-8") as f:
+            RAG_CHUNKS = json.load(f)
+        if not isinstance(RAG_CHUNKS, list):
+            raise ValueError("chunks.json must be a JSON array")
+        RAG_ERROR = None
+    except Exception as e:
+        RAG_INDEX = None
+        RAG_CHUNKS = None
+        RAG_ERROR = str(e)
+
+
+def _embed_text(text: str) -> np.ndarray:
+    """Returns a (d,) float32 embedding vector."""
+    emb = client.embeddings.create(
+        model="text-embedding-3-small",
+        input=text,
+    )
+
+    # Handle attribute-accessible or dict-like responses
+    data0 = emb.data[0] if hasattr(emb, "data") else emb["data"][0]
+    vec = data0.embedding if hasattr(data0, "embedding") else data0["embedding"]
+    return np.asarray(vec, dtype=np.float32)
+
+
+def _retrieve_top_chunks(query: str, k: int = 4) -> list[str]:
+    if RAG_INDEX is None or RAG_CHUNKS is None:
+        return []
+
+    q = _embed_text(query)
+    # FAISS expects shape (n, d)
+    q2 = np.expand_dims(q, axis=0)
+
+    # If dimensions don't match, fail closed (no RAG) instead of erroring the endpoint.
+    if hasattr(RAG_INDEX, "d") and q2.shape[1] != int(RAG_INDEX.d):
+        return []
+
+    _, idx = RAG_INDEX.search(q2, k)
+    results: list[str] = []
+    for i in idx[0].tolist():
+        if isinstance(i, (int, np.integer)) and 0 <= int(i) < len(RAG_CHUNKS):
+            chunk = RAG_CHUNKS[int(i)]
+            if isinstance(chunk, str) and chunk.strip():
+                results.append(chunk.strip())
+    return results
+
+
 class ChatIn(BaseModel):
     message: str
 
@@ -32,10 +100,25 @@ def root():
 @app.post("/chat")
 def chat(data: ChatIn):
     try:
+        examples = []
+        try:
+            examples = _retrieve_top_chunks(data.message, k=4)
+        except Exception:
+            examples = []
+
+        system_prompt = "Reply briefly."
+        if examples:
+            joined = "\n\n---\n\n".join(examples)
+            system_prompt = (
+                "Reply briefly.\n\n"
+                "Style examples (from past chat logs):\n"
+                f"{joined}"
+            )
+
         response = client.chat.completions.create(
             model="gpt-5-mini",
             messages=[
-                {"role": "system", "content": "Reply briefly."},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": data.message},
             ],
         )
@@ -48,55 +131,5 @@ def chat(data: ChatIn):
             reply = choice["message"]["content"]
 
         return {"reply": reply}
-    from fastapi import FastAPI
-    from fastapi.middleware.cors import CORSMiddleware
-    from pydantic import BaseModel
-    from openai import OpenAI
-    import os
-
-
-    app = FastAPI()
-
-    # Enable CORS (allows browser/mobile access)
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
-
-    # OpenAI v1 client using API key from environment (Render sets this)
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-
-    class ChatIn(BaseModel):
-        message: str
-
-
-    @app.get("/")
-    def root():
-        return {"status": "ok"}
-
-
-    @app.post("/chat")
-    def chat(data: ChatIn):
-        try:
-            response = client.chat.completions.create(
-                model="gpt-5-mini",
-                messages=[
-                    {"role": "system", "content": "Reply briefly."},
-                    {"role": "user", "content": data.message},
-                ],
-            )
-
-            # response structure may be attribute-accessible or dict-like; handle both
-            choice = response.choices[0] if hasattr(response, "choices") else response["choices"][0]
-            if hasattr(choice, "message") and hasattr(choice.message, "content"):
-                reply = choice.message.content
-            else:
-                reply = choice["message"]["content"]
-
-            return {"reply": reply}
-        except Exception as e:
-            return {"error": str(e)}
+    except Exception as e:
+        return {"error": str(e)}

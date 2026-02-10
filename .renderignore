@@ -1,0 +1,7 @@
+# Files and folders excluded from Render deployments
+# Keep local development artifacts and experimental code out of deploy
+dev/
+local_dev/
+tests/
+.vscode/
+.env
