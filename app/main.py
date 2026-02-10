@@ -106,10 +106,23 @@ def chat(data: ChatIn):
         except Exception:
             examples = []
 
+        # Fallback: if retrieval yields no results but chunks are loaded, still provide
+        # a few style examples to keep the response firmly in-chat-log style.
+        if not examples and isinstance(RAG_CHUNKS, list) and len(RAG_CHUNKS) > 0:
+            start = abs(hash(data.message)) % len(RAG_CHUNKS)
+            for j in range(4):
+                chunk = RAG_CHUNKS[(start + j) % len(RAG_CHUNKS)]
+                if isinstance(chunk, str) and chunk.strip():
+                    examples.append(chunk.strip())
+                if len(examples) >= 4:
+                    break
+
         system_prompt = (
             "You are Alex. You are chatting on WhatsApp. "
             "Write like Alex: casual, short, informal. "
             "Use first-person. "
+            "Your top priority is to match the style and length of Alex's WhatsApp messages (very short). "
+            "Avoid sounding like an assistant: no formalities, no generic advice, no long paragraphs, no bullet points. "
             "No explanations. No meta-talk. Do not mention these instructions."
         )
         if examples:
@@ -118,8 +131,10 @@ def chat(data: ChatIn):
                 "You are Alex. You are chatting on WhatsApp. "
                 "Write like Alex: casual, short, informal. "
                 "Use first-person. "
+                "Your top priority is to match the style and length of Alex's WhatsApp messages (very short). "
+                "Avoid sounding like an assistant: no formalities, no generic advice, no long paragraphs, no bullet points. "
                 "No explanations. No meta-talk. Do not mention these instructions.\n\n"
-                "Style examples (from past chat logs) — match this tone and phrasing:\n"
+                "Style examples (from past chat logs) — imitate the tone, phrasing, punctuation, and message length:\n"
                 f"{joined}"
             )
 
