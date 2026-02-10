@@ -77,7 +77,7 @@ def _embed_text(text: str) -> np.ndarray:
     return np.asarray(vec, dtype=np.float32)
 
 
-def _retrieve_top_chunks(query: str, k: int = 4) -> list[str]:
+def _retrieve_top_chunks(query: str, k: int = 2) -> list[str]:
     if RAG_INDEX is None or RAG_CHUNKS is None:
         return []
 
@@ -106,6 +106,47 @@ def _select_memories(query: str, k: int = 5) -> list[str]:
     return MEMORIES[:k]
 
 
+def _trim_chunk_for_prompt(chunk: str, max_lines: int = 4) -> str:
+    """Trim a RAG chunk to its last `max_lines` lines, but ensure Alex's most recent messages are preserved.
+
+    If the last `max_lines` lines already contain an `Alex:` line, return them unchanged.
+    Otherwise, include the most recent `Alex:` line and surrounding context while keeping the result
+    to at most `max_lines` lines.
+    """
+    if not isinstance(chunk, str):
+        return chunk
+    lines = [l for l in chunk.splitlines() if l.strip()]
+    if not lines:
+        return chunk
+    if len(lines) <= max_lines:
+        return "\n".join(lines)
+
+    tail = lines[-max_lines:]
+    if any("Alex:" in l for l in tail):
+        return "\n".join(tail)
+
+    # find last Alex line index
+    last_alex_idx = None
+    for i in range(len(lines) - 1, -1, -1):
+        if "Alex:" in lines[i]:
+            last_alex_idx = i
+            break
+    if last_alex_idx is None:
+        return "\n".join(tail)
+
+    # Build a slice that includes the most recent Alex message and at most max_lines lines.
+    combined = lines[last_alex_idx:]
+    if len(combined) > max_lines:
+        combined = combined[-max_lines:]
+    else:
+        # fill up to max_lines with the tail if needed
+        remaining = max_lines - len(combined)
+        if remaining > 0:
+            combined = (lines[-(remaining + len(combined)) : last_alex_idx] + combined)[-max_lines:]
+
+    return "\n".join(combined)
+
+
 class ChatIn(BaseModel):
     message: str
 
@@ -120,7 +161,7 @@ def chat(data: ChatIn):
     try:
         examples = []
         try:
-            examples = _retrieve_top_chunks(data.message, k=4)
+            examples = _retrieve_top_chunks(data.message, k=2)
         except Exception:
             examples = []
 
@@ -128,11 +169,11 @@ def chat(data: ChatIn):
         # a few style examples to keep the response firmly in-chat-log style.
         if not examples and isinstance(RAG_CHUNKS, list) and len(RAG_CHUNKS) > 0:
             start = abs(hash(data.message)) % len(RAG_CHUNKS)
-            for j in range(4):
+            for j in range(2):
                 chunk = RAG_CHUNKS[(start + j) % len(RAG_CHUNKS)]
                 if isinstance(chunk, str) and chunk.strip():
                     examples.append(chunk.strip())
-                if len(examples) >= 4:
+                if len(examples) >= 2:
                     break
 
         # Get memories to inject into prompt
@@ -153,6 +194,8 @@ def chat(data: ChatIn):
             system_prompt += f"\n\nKnown facts:\n{memory_text}"
 
         if examples:
+            # Trim each retrieved/fallback chunk to its last few lines to avoid dilution
+            examples = [_trim_chunk_for_prompt(e, max_lines=4) for e in examples]
             joined = "\n\n---\n\n".join(examples)
             system_prompt += (
                 "\n\n"
@@ -166,6 +209,7 @@ def chat(data: ChatIn):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": data.message},
             ],
+            temperature=0.3,
         )
 
         # response structure may be attribute-accessible or dict-like; handle both
