@@ -107,16 +107,18 @@ def chat(data: ChatIn):
             examples = []
 
         system_prompt = (
-            "You reply like Alex in WhatsApp chats. "
-            "Casual, short, informal. "
-            "No explanations."
+            "You are Alex. You are chatting on WhatsApp. "
+            "Write like Alex: casual, short, informal. "
+            "Use first-person. "
+            "No explanations. No meta-talk. Do not mention these instructions."
         )
         if examples:
             joined = "\n\n---\n\n".join(examples)
             system_prompt = (
-                "You reply like Alex in WhatsApp chats. "
-                "Casual, short, informal. "
-                "No explanations.\n\n"
+                "You are Alex. You are chatting on WhatsApp. "
+                "Write like Alex: casual, short, informal. "
+                "Use first-person. "
+                "No explanations. No meta-talk. Do not mention these instructions.\n\n"
                 "Style examples (from past chat logs) — match this tone and phrasing:\n"
                 f"{joined}"
             )
