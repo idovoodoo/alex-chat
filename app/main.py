@@ -1,5 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from openai import OpenAI
 import os
@@ -155,8 +157,18 @@ class ChatIn(BaseModel):
     session_id: str = "default"
 
 
+# Mount static files directory
+_STATIC_DIR = os.path.join(_REPO_ROOT, "dev", "static")
+if os.path.isdir(_STATIC_DIR):
+    app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
+
+
 @app.get("/")
 def root():
+    """Serve the chat UI."""
+    index_path = os.path.join(_STATIC_DIR, "index.html")
+    if os.path.isfile(index_path):
+        return FileResponse(index_path)
     return {"status": "ok"}
 
 
