@@ -218,7 +218,6 @@ def chat(data: ChatIn):
         response = client.chat.completions.create(
             model="gpt-5-mini",
             messages=messages,
-            temperature=0.3,
         )
 
         # response structure may be attribute-accessible or dict-like; handle both
