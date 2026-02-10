@@ -6,6 +6,4 @@ tests/
 .vscode/
 .env
 
-# Ensure the static UI in dev/static is deployed
-!dev/static/
-!dev/static/**
+# Static UI moved to repo root `static/` — keep deployed

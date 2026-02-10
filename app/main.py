@@ -158,7 +158,7 @@ class ChatIn(BaseModel):
 
 
 # Mount static files directory
-_STATIC_DIR = os.path.join(_REPO_ROOT, "dev", "static")
+_STATIC_DIR = os.path.join(_REPO_ROOT, "static")
 if os.path.isdir(_STATIC_DIR):
     app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
