@@ -562,10 +562,11 @@ def _search_life_memories(message: str, limit: int = 3) -> list[str]:
 
 
 def _summarize_conversation(session_history: list) -> str:
-    """Summarize a conversation into 1-2 short factual memory lines.
+    """Extract ONE durable factual memory from conversation.
     
-    Returns third-person, factual statements with no emotions, opinions, or temporary details.
-    Returns empty string if the conversation is too short or summarization fails.
+    Returns a single third-person, present-tense factual statement.
+    No emotions, no temporary details, no speculation.
+    Returns empty string if no durable fact exists or extraction fails.
     """
     if not session_history or len(session_history) < 2:
         return ""
@@ -578,18 +579,19 @@ def _summarize_conversation(session_history: list) -> str:
         elif msg["role"] == "assistant":
             conversation_text += f"Alex: {msg['content']}\n"
     
-    # Create summarization prompt
+    # Create strict summarization prompt
     summary_prompt = (
-        "Summarize this WhatsApp conversation into 1-2 short factual memory lines. "
+        "Extract ONE durable factual memory from this conversation.\n"
         "Requirements:\n"
-        "- Write in third person\n"
-        "- Include only facts, no emotions or opinions\n"
-        "- Exclude temporary details (times, dates, immediate plans)\n"
-        "- Focus on lasting facts about Alex's life, relationships, or preferences\n"
-        "- Each line should be a complete, standalone sentence\n"
-        "- If there are no important lasting facts, return NONE\n\n"
+        "- Third person\n"
+        "- Present tense\n"
+        "- No emotions\n"
+        "- No temporary details\n"
+        "- No speculation\n"
+        "- Return ONLY ONE sentence\n"
+        "- If no durable fact exists, return: NONE\n\n"
         f"Conversation:\n{conversation_text}\n\n"
-        "Memory (1-2 lines only):"
+        "Memory:"
     )
     
     try:
@@ -607,9 +609,60 @@ def _summarize_conversation(session_history: list) -> str:
         if summary.upper() == "NONE" or not summary:
             return ""
         
-        return summary
+        # Take only the first line if multiple were returned
+        first_line = summary.split('\n')[0].strip()
+        return first_line
     except Exception:
         return ""
+
+
+def _check_duplicate_memory(new_memory: str, threshold: float = 0.85) -> bool:
+    """Check if a memory is a duplicate using cosine similarity.
+    
+    Args:
+        new_memory: The memory text to check
+        threshold: Cosine similarity threshold (default 0.85)
+    
+    Returns:
+        True if duplicate found (similarity > threshold), False otherwise
+    """
+    if not new_memory or not new_memory.strip():
+        return True  # Empty memory is considered duplicate
+    
+    if not MEMORIES or not isinstance(MEMORIES, list) or len(MEMORIES) == 0:
+        return False  # No existing memories, so not a duplicate
+    
+    try:
+        # Generate embedding for new memory
+        new_embedding, _ = _embed_text(new_memory)
+        
+        # Compare against all existing memories
+        for existing_memory in MEMORIES:
+            if not existing_memory or not isinstance(existing_memory, str):
+                continue
+            
+            # Generate embedding for existing memory
+            existing_embedding, _ = _embed_text(existing_memory)
+            
+            # Calculate cosine similarity
+            dot_product = np.dot(new_embedding, existing_embedding)
+            norm_new = np.linalg.norm(new_embedding)
+            norm_existing = np.linalg.norm(existing_embedding)
+            
+            if norm_new == 0 or norm_existing == 0:
+                continue
+            
+            similarity = dot_product / (norm_new * norm_existing)
+            
+            # Check if above threshold
+            if similarity > threshold:
+                logging.info(f"Duplicate memory detected (similarity: {similarity:.3f})")
+                return True
+        
+        return False
+    except Exception as e:
+        logging.error(f"Error checking duplicate memory: {type(e).__name__}: {e}")
+        return False  # On error, proceed with insert to avoid data loss
 
 
 def _save_memory(memory_line: str):
@@ -1062,17 +1115,36 @@ class NewChatIn(BaseModel):
 def new_chat(data: NewChatIn):
     """End the current chat session and start a new one.
     
-    Summarizes the previous conversation and saves it to Supabase core_memories.
+    Summarizes the previous conversation, checks for duplicates using embedding similarity,
+    and saves to Supabase core_memories if not a duplicate.
     """
     try:
         # Get the conversation history for this session
         session_history = CONVERSATION_HISTORY.get(data.session_id, [])
         
+        summary_saved = False
+        duplicate_detected = False
+        
         # If there's conversation history, summarize and save it
         if session_history:
+            # Extract ONE durable factual memory
             summary = _summarize_conversation(session_history)
+            
             if summary:
-                _save_memory(summary)
+                # Check for duplicates using cosine similarity (threshold 0.85)
+                is_duplicate = _check_duplicate_memory(summary, threshold=0.85)
+                
+                if is_duplicate:
+                    duplicate_detected = True
+                    logging.info(f"Memory not saved (duplicate): {summary}")
+                else:
+                    # Not a duplicate, save to database
+                    _save_memory(summary)
+                    summary_saved = True
+                    logging.info(f"New memory saved: {summary}")
+                    
+                    # Reload core_memories into cache
+                    _reload_memories()
         
         # Clear the conversation history for this session
         if data.session_id in CONVERSATION_HISTORY:
@@ -1081,7 +1153,9 @@ def new_chat(data: NewChatIn):
         return {
             "status": "ok",
             "message": "New chat started",
-            "summary_saved": bool(session_history and summary)
+            "summary_saved": summary_saved,
+            "duplicate_detected": duplicate_detected
         }
     except Exception as e:
+        logging.error(f"Error in new_chat: {type(e).__name__}: {e}")
         return {"error": str(e)}
