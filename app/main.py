@@ -4,6 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from openai import OpenAI
+import google.generativeai as genai
 import os
 import json
 
@@ -24,6 +25,9 @@ app.add_middleware(
 
 # OpenAI v1 client using API key from environment (Render sets this)
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# Configure Gemini API
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 
 # --- Minimal FAISS RAG wiring (loads at startup) ---
@@ -156,6 +160,7 @@ class ChatIn(BaseModel):
     message: str
     session_id: str = "default"
     user_name: str = "User"
+    model: str = "gpt-5-mini"
 
 
 # Mount static files directory
@@ -238,17 +243,38 @@ def chat(data: ChatIn):
         messages.extend(session_history)  # Inject conversation history
         messages.append({"role": "user", "content": data.message})
         
-        response = client.chat.completions.create(
-            model="gpt-5-mini",
-            messages=messages,
-        )
-
-        # response structure may be attribute-accessible or dict-like; handle both
-        choice = response.choices[0] if hasattr(response, "choices") else response["choices"][0]
-        if hasattr(choice, "message") and hasattr(choice.message, "content"):
-            reply = choice.message.content
+        # Check if using Gemini or OpenAI
+        if data.model.startswith("gemini"):
+            # Use Gemini API
+            gemini_model = genai.GenerativeModel(data.model)
+            
+            # Convert messages to Gemini format
+            gemini_history = []
+            gemini_prompt = system_prompt + "\n\n"
+            
+            for msg in session_history:
+                if msg["role"] == "user":
+                    gemini_prompt += f"User: {msg['content']}\n"
+                elif msg["role"] == "assistant":
+                    gemini_prompt += f"Alex: {msg['content']}\n"
+            
+            gemini_prompt += f"User: {data.message}\nAlex:"
+            
+            response = gemini_model.generate_content(gemini_prompt)
+            reply = response.text
         else:
-            reply = choice["message"]["content"]
+            # Use OpenAI API
+            response = client.chat.completions.create(
+                model=data.model,
+                messages=messages,
+            )
+
+            # response structure may be attribute-accessible or dict-like; handle both
+            choice = response.choices[0] if hasattr(response, "choices") else response["choices"][0]
+            if hasattr(choice, "message") and hasattr(choice.message, "content"):
+                reply = choice.message.content
+            else:
+                reply = choice["message"]["content"]
         
         # Update conversation history with user message and assistant reply
         session_history.append({"role": "user", "content": data.message})

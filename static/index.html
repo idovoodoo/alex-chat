@@ -415,6 +415,35 @@
             color: #666;
             margin-left: 8px;
         }
+
+        /* Model selector dropdown */
+        #model-selector-container {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        #model-selector-container label {
+            font-size: 12px;
+            color: #e0e0e0;
+            font-weight: 500;
+        }
+
+        #model-selector {
+            background: white;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+            outline: none;
+            color: #075e54;
+            font-weight: 600;
+        }
+
+        #model-selector:hover {
+            background: #f0f0f0;
+        }
     </style>
 </head>
 <body>
@@ -457,6 +486,15 @@
                     Chat with Alex
                     <span id="current-user-display"></span>
                 </div>
+                <div id="model-selector-container">
+                    <label for="model-selector">Model:</label>
+                    <select id="model-selector">
+                        <option value="gpt-5-mini">GPT-5 Mini</option>
+                        <option value="gpt-4o">GPT-4o</option>
+                        <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                        <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash Lite</option>
+                    </select>
+                </div>
             </header>
             
             <div id="chat-container">
@@ -493,6 +531,7 @@
         const userModal = document.getElementById('user-modal');
         const userNameInput = document.getElementById('user-name-input');
         const currentUserDisplay = document.getElementById('current-user-display');
+        const modelSelector = document.getElementById('model-selector');
 
         // User management
         let currentUser = null;
@@ -500,6 +539,24 @@
         // Chat management
         let currentChatId = null;
         let chats = {};
+
+        // Model management
+        function saveSelectedModel() {
+            localStorage.setItem('alex_selected_model', modelSelector.value);
+        }
+
+        function loadSelectedModel() {
+            const savedModel = localStorage.getItem('alex_selected_model');
+            if (savedModel) {
+                modelSelector.value = savedModel;
+            }
+        }
+
+        // Load saved model on page load
+        loadSelectedModel();
+
+        // Save model when changed
+        modelSelector.addEventListener('change', saveSelectedModel);
 
         // Quick name selection
         window.selectQuickName = function(name) {
@@ -736,7 +793,8 @@
                     body: JSON.stringify({
                         message: message,
                         session_id: chat.sessionId,
-                        user_name: currentUser
+                        user_name: currentUser,
+                        model: modelSelector.value
                     })
                 });
 
