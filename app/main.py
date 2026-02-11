@@ -244,51 +244,26 @@ def _debug_db():
     )
 
     diagnostics = {
+        "_section_environment": "=== ENVIRONMENT ===",
         "render_detected": bool(render_detected),
-        "cwd": os.getcwd(),
-        "repo_root": _REPO_ROOT,
-        "dotenv_loaded_from": _DOTENV_LOADED_FROM,
-        "dotenv_load_result": _DOTENV_LOAD_RESULT,
-        "dotenv_locations": [{"path": p, "exists": os.path.exists(p)} for p in _dotenv_locations],
-        "env_var_set": bool(supabase_db_url),
-        "env_keys_with_supabase": [k for k in os.environ.keys() if "SUPABASE" in k.upper()],
-        # Safe DB URL hints (no credentials)
+        "openai_api_key_set": bool(os.getenv("OPENAI_API_KEY")),
+        "gemini_api_key_set": bool(os.getenv("GEMINI_API_KEY")),
+        
+        "_section_database": "=== DATABASE ===",
         "db_url_scheme": (parsed.scheme if parsed else None),
         "db_url_host": (parsed.hostname if parsed else None),
         "db_url_port": (parsed.port if parsed else None),
-        "db_url_db": (parsed.path.lstrip("/") if (parsed and parsed.path) else None),
-        "db_url_sslmode": sslmode,
-        "db_conn_object": DB_CONN is not None,
+        "db_conn_alive": DB_CONN is not None,
         "db_last_error": DB_LAST_ERROR,
-        "cached_core_memories_loaded": isinstance(MEMORIES, list),
-        "cached_core_memories_count": len(MEMORIES) if isinstance(MEMORIES, list) else 0,
-        "recall_triggers_count": len(_RECALL_TRIGGERS),
-        "past_question_patterns_count": len(_PAST_QUESTION_PATTERNS),
-        # Also show whether other common envs are set (booleans only)
-        "openai_api_key_set": bool(os.getenv("OPENAI_API_KEY")),
-        "gemini_api_key_set": bool(os.getenv("GEMINI_API_KEY")),
+        
+        "_section_memory_counts": "=== MEMORY COUNTS ===",
+        "cached_core_memories": len(MEMORIES) if isinstance(MEMORIES, list) else 0,
+        
+        "_section_patterns": "=== DETECTION PATTERNS ===",
+        "recall_triggers": len(_RECALL_TRIGGERS),
+        "remember_when_patterns": len(_REMEMBER_WHEN_PATTERNS),
+        "past_question_patterns": len(_PAST_QUESTION_PATTERNS),
     }
-    
-    # DNS resolution check (helps debug Render/Supabase hostname issues)
-    if parsed and parsed.hostname:
-        try:
-            diagnostics["dns_lookup"] = socket.gethostbyname(parsed.hostname)
-        except Exception as e:
-            diagnostics["dns_lookup"] = f"failed: {type(e).__name__}: {e}"
-    else:
-        diagnostics["dns_lookup"] = None
-
-    # Try a test query
-    if _ensure_db_connection():
-        try:
-            with DB_CONN.cursor() as cur:
-                cur.execute("SELECT 1")
-                cur.fetchone()
-            diagnostics["test_query"] = "success"
-        except Exception as e:
-            diagnostics["test_query"] = f"failed: {str(e)}"
-    else:
-        diagnostics["test_query"] = "no connection"
     
     # Try to count memories in DB (unified table)
     if _ensure_db_connection():
@@ -300,38 +275,39 @@ def _debug_db():
                 # Count life memories
                 cur.execute("SELECT COUNT(*) FROM memories WHERE type = 'life'")
                 life_count = cur.fetchone()[0]
-            diagnostics["db_core_memories_count"] = int(core_count)
-            diagnostics["db_life_memories_count"] = int(life_count)
+            diagnostics["db_core_memories"] = int(core_count)
+            diagnostics["db_life_memories"] = int(life_count)
         except Exception as e:
-            diagnostics["db_core_memories_count"] = f"error: {str(e)}"
-            diagnostics["db_life_memories_count"] = f"error: {str(e)}"
+            diagnostics["db_core_memories"] = f"error: {str(e)}"
+            diagnostics["db_life_memories"] = f"error: {str(e)}"
     else:
-        diagnostics["db_core_memories_count"] = "no connection"
-        diagnostics["db_life_memories_count"] = "no connection"
+        diagnostics["db_core_memories"] = "connection failed"
+        diagnostics["db_life_memories"] = "connection failed"
 
     # Include last life-memory recall info if available
+    diagnostics["_section_last_recall"] = "=== LAST LIFE MEMORY SEARCH ==="
     try:
-        if LIFE_RECALL_DEBUG is not None:
-            diagnostics["life_recall_debug"] = LIFE_RECALL_DEBUG
-        else:
-            diagnostics["life_recall_debug"] = "No recall attempts yet"
-    except Exception:
-        diagnostics["life_recall_debug"] = None
-    
-    try:
-        if LAST_LIFE_RECALL is None:
-            diagnostics["last_life_memory_recall"] = None
-        else:
-            # Make timestamp JSON-serializable
-            lr = LAST_LIFE_RECALL
-            diagnostics["last_life_memory_recall"] = {
-                "time_utc": lr.get("time").isoformat() if lr.get("time") else None,
-                "session_id": lr.get("session_id"),
-                "query_snippet": (lr.get("query")[:200] + "...") if lr.get("query") and len(lr.get("query")) > 200 else lr.get("query"),
-                "results_count": int(lr.get("results_count") or 0),
+        if LIFE_RECALL_DEBUG is not None and isinstance(LIFE_RECALL_DEBUG, dict):
+            # Format nicely for readability
+            recall_info = {
+                "query": LIFE_RECALL_DEBUG.get("search_message", "N/A"),
+                "keywords_extracted": LIFE_RECALL_DEBUG.get("keywords", []),
+                "is_past_question": LIFE_RECALL_DEBUG.get("is_past_question", False),
+                "is_remember_when": LIFE_RECALL_DEBUG.get("is_remember_when", False),
+                "recall_triggered": LIFE_RECALL_DEBUG.get("recall_triggered", False),
+                "results_found": LIFE_RECALL_DEBUG.get("results_count", 0),
+                "llm_bypassed": LIFE_RECALL_DEBUG.get("llm_bypassed", False),
+                "bypass_reason": LIFE_RECALL_DEBUG.get("bypass_reason", "N/A"),
             }
-    except Exception:
-        diagnostics["last_life_memory_recall"] = None
+            if LIFE_RECALL_DEBUG.get("error"):
+                recall_info["error"] = LIFE_RECALL_DEBUG["error"]
+            if LIFE_RECALL_DEBUG.get("results_preview"):
+                recall_info["results_preview"] = LIFE_RECALL_DEBUG["results_preview"]
+            diagnostics["last_recall_attempt"] = recall_info
+        else:
+            diagnostics["last_recall_attempt"] = "No searches yet"
+    except Exception as e:
+        diagnostics["last_recall_attempt"] = f"error: {str(e)}"
 
     return diagnostics
 
@@ -449,10 +425,20 @@ _RECALL_TRIGGERS = {
     "last time",
 }
 
+# "Do you remember when" style patterns
+_REMEMBER_WHEN_PATTERNS = [
+    r"\bdo\s+you\s+remember\s+(when|that|the)",
+    r"\bremember\s+when\b",
+    r"\bremember\s+that\s+time\b",
+    r"\bthat\s+time\s+(when|we|you)\b",
+    r"\bback\s+when\b",
+    r"\byou\s+remember\s+(when|that|the)\b",
+]
+
 # Past factual question patterns
 _PAST_QUESTION_PATTERNS = [
-    r"\b(where|what|when|who|how)\s+(did|have|was|were|had)\b",
-    r"\b(where|what|when|who|how)\s+.{0,20}(been|done|went|visited|traveled|travelled)\b",
+    r"\b(where|what|when|who|how)\s+(did|have|has|was|were|had)\b",
+    r"\b(where|what|when|who)\s+have\s+you\s+(been|gone|done|seen|visited)\b",
     r"\bhave\s+you\s+(been|gone|visited|done|seen)\b",
     r"\bdid\s+you\s+(go|visit|travel|see|do)\b",
     r"\bwhere\s+(have|did)\b",
@@ -470,6 +456,32 @@ def _is_past_factual_question(message: str) -> bool:
         if re.search(pattern, m):
             return True
     return False
+
+
+def _is_remember_when_prompt(message: str) -> bool:
+    """Detect 'do you remember when' style prompts."""
+    if not isinstance(message, str) or not message.strip():
+        return False
+    m = message.lower()
+    for pattern in _REMEMBER_WHEN_PATTERNS:
+        if re.search(pattern, m):
+            return True
+    return False
+
+
+def _generate_clarification_question(message: str) -> str:
+    """Generate a casual clarification question in Alex's style."""
+    options = [
+        "which time?",
+        "when was that?",
+        "what year?",
+        "when?",
+        "which one?",
+        "need more details",
+        "refresh my memory?",
+    ]
+    # Pick based on message hash for consistency
+    return options[abs(hash(message)) % len(options)]
 
 
 def _message_suggests_recall(message: str) -> bool:
@@ -893,15 +905,29 @@ def chat(data: ChatIn):
         # Optional: retrieve life memories only when the message suggests recall or is a past factual question
         life_memories: list[str] = []
         global LIFE_RECALL_DEBUG
-        LIFE_RECALL_DEBUG = {"timestamp": datetime.utcnow().isoformat()}
+        LIFE_RECALL_DEBUG = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "message": data.message[:100]
+        }
+        
+        # Check what type of question this is
+        suggests_recall = _message_suggests_recall(data.message)
+        is_past_q = _is_past_factual_question(data.message)
+        is_remember = _is_remember_when_prompt(data.message)
+        
+        LIFE_RECALL_DEBUG["suggests_recall"] = suggests_recall
+        LIFE_RECALL_DEBUG["is_past_question"] = is_past_q
+        LIFE_RECALL_DEBUG["is_remember_when"] = is_remember
         
         try:
-            if _message_suggests_recall(data.message) or _is_past_factual_question(data.message):
+            if suggests_recall or is_past_q or is_remember:
                 life_memories = _search_life_memories(data.message, limit=3)
-                LIFE_RECALL_DEBUG["life_memories_count"] = len(life_memories)
+                LIFE_RECALL_DEBUG["search_executed"] = True
+                LIFE_RECALL_DEBUG["results_count"] = len(life_memories)
                 logging.info(f"Life memories retrieved: {len(life_memories)} items")
             else:
-                LIFE_RECALL_DEBUG["skipped_reason"] = "message does not suggest recall or past question"
+                LIFE_RECALL_DEBUG["search_executed"] = False
+                LIFE_RECALL_DEBUG["skipped_reason"] = "message does not suggest recall, past question, or remember_when"
                 logging.info("Life memory search skipped: message does not suggest recall or past question")
         except Exception as e:
             LIFE_RECALL_DEBUG["error"] = f"{type(e).__name__}: {e}"
@@ -921,9 +947,36 @@ def chat(data: ChatIn):
 
         # Check if this is a past factual question with no supporting memories
         is_past_question = _is_past_factual_question(data.message)
+        is_remember_when = _is_remember_when_prompt(data.message)
         LIFE_RECALL_DEBUG["is_past_question"] = is_past_question
+        LIFE_RECALL_DEBUG["is_remember_when"] = is_remember_when
         LIFE_RECALL_DEBUG["llm_bypassed"] = False
         
+        # If "do you remember when" style with no memories, ask for clarification
+        if is_remember_when and not life_memories:
+            LIFE_RECALL_DEBUG["llm_bypassed"] = True
+            LIFE_RECALL_DEBUG["bypass_reason"] = "remember_when prompt with no matching memories - asking for clarification"
+            
+            reply = _generate_clarification_question(data.message)
+            
+            # Update history
+            session_history.append({"role": "user", "content": data.message})
+            session_history.append({"role": "assistant", "content": reply})
+            if len(session_history) > 6:
+                session_history = session_history[-6:]
+            CONVERSATION_HISTORY[data.session_id] = session_history
+            
+            return {
+                "reply": reply,
+                "tokens": {
+                    "calls": [],
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0,
+                },
+            }
+        
+        # Otherwise, if it's a past question with no memories, return uncertainty
         if is_past_question and not life_memories:
             # Bypass LLM - return a short uncertainty response in Alex's style
             LIFE_RECALL_DEBUG["llm_bypassed"] = True
