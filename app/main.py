@@ -71,7 +71,6 @@ RAG_INDEX = None
 RAG_CHUNKS = None
 RAG_ERROR = None
 MEMORIES = None
-LIFE_MEMORIES = None
 DB_CONN = None
 DB_LAST_ERROR = None
 LAST_LIFE_RECALL = None
@@ -83,7 +82,7 @@ CONVERSATION_HISTORY = {}
 
 @app.on_event("startup")
 def _load_rag_assets():
-    global RAG_INDEX, RAG_CHUNKS, RAG_ERROR, MEMORIES, LIFE_MEMORIES, DB_CONN
+    global RAG_INDEX, RAG_CHUNKS, RAG_ERROR, MEMORIES, DB_CONN
     faiss_path = os.getenv("RAG_FAISS_INDEX_PATH", _DEFAULT_FAISS_PATH)
     chunks_path = os.getenv("RAG_CHUNKS_PATH", _DEFAULT_CHUNKS_PATH)
 
@@ -118,40 +117,27 @@ def _load_rag_assets():
 
             DB_CONN = psycopg2.connect(db_url, connect_timeout=10)
             logging.info("Database connection successful")
-            # Load core_memories into MEMORIES
+            # Load core memories from unified memories table
             with DB_CONN.cursor() as cur:
-                cur.execute("SELECT content FROM core_memories ORDER BY id")
+                cur.execute("SELECT content FROM memories WHERE type = 'core' ORDER BY id")
                 rows = cur.fetchall()
                 MEMORIES = [row[0] for row in rows if row[0]]
             # Log how many memories were loaded
             try:
                 count = len(MEMORIES) if isinstance(MEMORIES, list) else 0
-                logging.info(f"Loaded {count} core_memories from database")
+                logging.info(f"Loaded {count} core memories from database")
             except Exception:
-                logging.info("Loaded core_memories from database (count unknown)")
-            # Load life_memories into LIFE_MEMORIES
-            with DB_CONN.cursor() as cur:
-                cur.execute("SELECT content FROM life_memories ORDER BY id")
-                rows = cur.fetchall()
-                LIFE_MEMORIES = [row[0] for row in rows if row[0]]
-            # Log how many life memories were loaded
-            try:
-                count = len(LIFE_MEMORIES) if isinstance(LIFE_MEMORIES, list) else 0
-                logging.info(f"Loaded {count} life_memories from database")
-            except Exception:
-                logging.info("Loaded life_memories from database (count unknown)")
+                logging.info("Loaded core memories from database (count unknown)")
         else:
             logging.warning("SUPABASE_DB_URL environment variable not set")
             MEMORIES = None
-            LIFE_MEMORIES = None
     except Exception as e:
         # Log the exception for debugging and clear connection/memories
-        logging.exception("Failed to connect to Supabase/Postgres or load core_memories")
+        logging.exception("Failed to connect to Supabase/Postgres or load core memories")
         global DB_LAST_ERROR
         DB_LAST_ERROR = f"{type(e).__name__}: {e}"
         DB_CONN = None
         MEMORIES = None
-        LIFE_MEMORIES = None
     finally:
         # Diagnostic log whether DB_CONN appears connected
         if DB_CONN:
@@ -166,7 +152,7 @@ def _db_status():
     """Return whether the application can reach the configured Supabase/Postgres DB."""
     try:
         if DB_CONN is None:
-            return {"connected": False, "core_memories_count": 0, "error": DB_LAST_ERROR}
+            return {"connected": False, "cached_core_memories_count": 0, "error": DB_LAST_ERROR}
         with DB_CONN.cursor() as cur:
             cur.execute("SELECT 1")
             cur.fetchone()
@@ -175,9 +161,9 @@ def _db_status():
             count = len(MEMORIES) if isinstance(MEMORIES, list) else 0
         except Exception:
             count = 0
-        return {"connected": True, "core_memories_count": int(count), "error": None}
+        return {"connected": True, "cached_core_memories_count": int(count), "error": None}
     except Exception:
-        return {"connected": False, "core_memories_count": 0, "error": DB_LAST_ERROR}
+        return {"connected": False, "cached_core_memories_count": 0, "error": DB_LAST_ERROR}
 
 
 @app.get("/debug/db")
@@ -226,8 +212,8 @@ def _debug_db():
         "db_url_sslmode": sslmode,
         "db_conn_object": DB_CONN is not None,
         "db_last_error": DB_LAST_ERROR,
-        "memories_loaded": isinstance(MEMORIES, list),
-        "memories_count": len(MEMORIES) if isinstance(MEMORIES, list) else 0,
+        "cached_core_memories_loaded": isinstance(MEMORIES, list),
+        "cached_core_memories_count": len(MEMORIES) if isinstance(MEMORIES, list) else 0,
         "recall_triggers_count": len(_RECALL_TRIGGERS),
         "past_question_patterns_count": len(_PAST_QUESTION_PATTERNS),
         # Also show whether other common envs are set (booleans only)
@@ -256,17 +242,24 @@ def _debug_db():
     else:
         diagnostics["test_query"] = "no connection"
     
-    # Try to count core_memories in DB
+    # Try to count memories in DB (unified table)
     if DB_CONN:
         try:
             with DB_CONN.cursor() as cur:
-                cur.execute("SELECT COUNT(*) FROM core_memories")
-                count = cur.fetchone()[0]
-            diagnostics["db_row_count"] = int(count)
+                # Count core memories
+                cur.execute("SELECT COUNT(*) FROM memories WHERE type = 'core'")
+                core_count = cur.fetchone()[0]
+                # Count life memories
+                cur.execute("SELECT COUNT(*) FROM memories WHERE type = 'life'")
+                life_count = cur.fetchone()[0]
+            diagnostics["db_core_memories_count"] = int(core_count)
+            diagnostics["db_life_memories_count"] = int(life_count)
         except Exception as e:
-            diagnostics["db_row_count"] = f"error: {str(e)}"
+            diagnostics["db_core_memories_count"] = f"error: {str(e)}"
+            diagnostics["db_life_memories_count"] = f"error: {str(e)}"
     else:
-        diagnostics["db_row_count"] = "no connection"
+        diagnostics["db_core_memories_count"] = "no connection"
+        diagnostics["db_life_memories_count"] = "no connection"
 
     # Include last life-memory recall info if available
     try:
@@ -375,7 +368,7 @@ def _reload_memories():
     try:
         if DB_CONN:
             with DB_CONN.cursor() as cur:
-                cur.execute("SELECT content FROM core_memories ORDER BY id")
+                cur.execute("SELECT content FROM memories WHERE type = 'core' ORDER BY id")
                 rows = cur.fetchall()
                 MEMORIES = [row[0] for row in rows if row[0]]
         else:
@@ -386,31 +379,9 @@ def _reload_memories():
     # Log how many memories are currently loaded
     try:
         count = len(MEMORIES) if isinstance(MEMORIES, list) else 0
-        logging.info(f"Reloaded core_memories: {count} items in MEMORIES")
+        logging.info(f"Reloaded core memories: {count} items in MEMORIES")
     except Exception:
-        logging.info("Reloaded core_memories (count unknown)")
-
-
-def _reload_life_memories():
-    """Reload life_memories from Supabase database into the global LIFE_MEMORIES variable."""
-    global LIFE_MEMORIES
-    try:
-        if DB_CONN:
-            with DB_CONN.cursor() as cur:
-                cur.execute("SELECT content FROM life_memories ORDER BY id")
-                rows = cur.fetchall()
-                LIFE_MEMORIES = [row[0] for row in rows if row[0]]
-        else:
-            LIFE_MEMORIES = None
-    except Exception:
-        LIFE_MEMORIES = None
-
-    # Log how many life memories are currently loaded
-    try:
-        count = len(LIFE_MEMORIES) if isinstance(LIFE_MEMORIES, list) else 0
-        logging.info(f"Reloaded life_memories: {count} items in LIFE_MEMORIES")
-    except Exception:
-        logging.info("Reloaded life_memories (count unknown)")
+        logging.info("Reloaded core memories (count unknown)")
 
 
 _RECALL_TRIGGERS = {
@@ -471,7 +442,7 @@ def _message_suggests_recall(message: str) -> bool:
 
 
 def _search_life_memories(message: str, limit: int = 3) -> list[str]:
-    """Simple keyword search against life_memories.content (ILIKE)."""
+    """Simple keyword search against memories table WHERE type='life'."""
     global LIFE_RECALL_DEBUG
     
     if LIFE_RECALL_DEBUG is None:
@@ -580,7 +551,7 @@ def _search_life_memories(message: str, limit: int = 3) -> list[str]:
 
     try:
         with DB_CONN.cursor() as cur:
-            query = f"SELECT content FROM life_memories WHERE ({clauses}) LIMIT %s"
+            query = f"SELECT content FROM memories WHERE type = 'life' AND ({clauses}) LIMIT %s"
             LIFE_RECALL_DEBUG["sql_query"] = query
             LIFE_RECALL_DEBUG["sql_params"] = params
             logging.info(f"Executing life memory query with {len(keywords)} keywords, limit={limit}")
@@ -658,7 +629,7 @@ def _check_duplicate_memory(new_memory: str, threshold: float = 0.85, check_life
     Args:
         new_memory: The memory text to check
         threshold: Cosine similarity threshold (default 0.85)
-        check_life_memories: If True, check against LIFE_MEMORIES; if False, check against MEMORIES
+        check_life_memories: If True, check against life memories; if False, check against MEMORIES
     
     Returns:
         True if duplicate found (similarity > threshold), False otherwise
@@ -666,8 +637,21 @@ def _check_duplicate_memory(new_memory: str, threshold: float = 0.85, check_life
     if not new_memory or not new_memory.strip():
         return True  # Empty memory is considered duplicate
     
-    # Select which memory cache to check
-    memory_cache = LIFE_MEMORIES if check_life_memories else MEMORIES
+    # Get memory cache
+    if check_life_memories:
+        # Query life memories from database
+        try:
+            if DB_CONN:
+                with DB_CONN.cursor() as cur:
+                    cur.execute("SELECT content FROM memories WHERE type = 'life' ORDER BY id")
+                    rows = cur.fetchall()
+                    memory_cache = [row[0] for row in rows if row[0]]
+            else:
+                memory_cache = []
+        except Exception:
+            memory_cache = []
+    else:
+        memory_cache = MEMORIES
     
     if not memory_cache or not isinstance(memory_cache, list) or len(memory_cache) == 0:
         return False  # No existing memories, so not a duplicate
@@ -706,7 +690,7 @@ def _check_duplicate_memory(new_memory: str, threshold: float = 0.85, check_life
 
 
 def _save_memory(memory_line: str):
-    """Append a memory line to Supabase core_memories table and reload MEMORIES.
+    """Append a memory line to Supabase memories table and reload MEMORIES.
     
     Args:
         memory_line: A single memory string or multiple lines separated by newlines
@@ -722,7 +706,7 @@ def _save_memory(memory_line: str):
             # Insert each memory into the database
             with DB_CONN.cursor() as cur:
                 for mem in new_memories:
-                    cur.execute("INSERT INTO core_memories (content) VALUES (%s)", (mem,))
+                    cur.execute("INSERT INTO memories (content, type) VALUES (%s, %s)", (mem, 'core'))
             DB_CONN.commit()
             
             # Reload global MEMORIES
@@ -732,7 +716,7 @@ def _save_memory(memory_line: str):
 
 
 def _save_life_memory(memory_line: str):
-    """Append a memory line to Supabase life_memories table and reload LIFE_MEMORIES.
+    """Append a memory line to Supabase memories table with type='life'.
     
     Args:
         memory_line: A single memory string or multiple lines separated by newlines
@@ -748,12 +732,9 @@ def _save_life_memory(memory_line: str):
             # Insert each memory into the database
             with DB_CONN.cursor() as cur:
                 for mem in new_memories:
-                    cur.execute("INSERT INTO life_memories (content) VALUES (%s)", (mem,))
+                    cur.execute("INSERT INTO memories (content, type) VALUES (%s, %s)", (mem, 'life'))
             DB_CONN.commit()
-            logging.info(f"Saved {len(new_memories)} life_memories to database")
-            
-            # Reload global LIFE_MEMORIES
-            _reload_life_memories()
+            logging.info(f"Saved {len(new_memories)} life memories to database")
     except Exception as e:
         logging.error(f"Failed to save life_memory: {type(e).__name__}: {e}")
 
@@ -1183,7 +1164,7 @@ def new_chat(data: NewChatIn):
     """End the current chat session and start a new one.
     
     Summarizes the previous conversation, checks for duplicates using embedding similarity,
-    and saves to Supabase life_memories if not a duplicate.
+    and saves to the unified memories table (type='life') if not a duplicate.
     """
     try:
         # Get the conversation history for this session
@@ -1206,20 +1187,17 @@ def new_chat(data: NewChatIn):
                 logging.info("No durable memory extracted from conversation")
             
             if summary:
-                # Check for duplicates using cosine similarity (threshold 0.85) against life_memories
+                # Check for duplicates using cosine similarity (threshold 0.85) against life memories
                 is_duplicate = _check_duplicate_memory(summary, threshold=0.85, check_life_memories=True)
                 
                 if is_duplicate:
                     duplicate_detected = True
                     logging.info(f"Memory not saved (duplicate): {summary}")
                 else:
-                    # Not a duplicate, save to life_memories database
+                    # Not a duplicate, save to memories table (type='life')
                     _save_life_memory(summary)
                     summary_saved = True
                     logging.info(f"New life_memory saved: {summary}")
-                    
-                    # Reload life_memories into cache
-                    _reload_life_memories()
         
         # Clear the conversation history for this session
         if data.session_id in CONVERSATION_HISTORY:
