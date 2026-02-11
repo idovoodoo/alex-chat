@@ -118,7 +118,6 @@ def _load_rag_assets():
             logging.info("Database connection successful")
             # Load core_memories into MEMORIES
             with DB_CONN.cursor() as cur:
-    LAST_LIFE_RECALL = None
                 cur.execute("SELECT content FROM core_memories ORDER BY id")
                 rows = cur.fetchall()
                 MEMORIES = [row[0] for row in rows if row[0]]
