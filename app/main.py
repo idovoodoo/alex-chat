@@ -74,6 +74,7 @@ MEMORIES = None
 DB_CONN = None
 DB_LAST_ERROR = None
 LAST_LIFE_RECALL = None
+LIFE_RECALL_DEBUG = None
 
 # In-memory conversation history per session
 CONVERSATION_HISTORY = {}
@@ -213,6 +214,8 @@ def _debug_db():
         "db_last_error": DB_LAST_ERROR,
         "memories_loaded": isinstance(MEMORIES, list),
         "memories_count": len(MEMORIES) if isinstance(MEMORIES, list) else 0,
+        "recall_triggers_count": len(_RECALL_TRIGGERS),
+        "past_question_patterns_count": len(_PAST_QUESTION_PATTERNS),
         # Also show whether other common envs are set (booleans only)
         "openai_api_key_set": bool(os.getenv("OPENAI_API_KEY")),
         "gemini_api_key_set": bool(os.getenv("GEMINI_API_KEY")),
@@ -252,6 +255,14 @@ def _debug_db():
         diagnostics["db_row_count"] = "no connection"
 
     # Include last life-memory recall info if available
+    try:
+        if LIFE_RECALL_DEBUG is not None:
+            diagnostics["life_recall_debug"] = LIFE_RECALL_DEBUG
+        else:
+            diagnostics["life_recall_debug"] = "No recall attempts yet"
+    except Exception:
+        diagnostics["life_recall_debug"] = None
+    
     try:
         if LAST_LIFE_RECALL is None:
             diagnostics["last_life_memory_recall"] = None
@@ -383,26 +394,63 @@ _RECALL_TRIGGERS = {
     "last time",
 }
 
+# Past factual question patterns
+_PAST_QUESTION_PATTERNS = [
+    r"\b(where|what|when|who|how)\s+(did|have|was|were|had)\b",
+    r"\b(where|what|when|who|how)\s+.{0,20}(been|done|went|visited|traveled|travelled)\b",
+    r"\bhave\s+you\s+(been|gone|visited|done|seen)\b",
+    r"\bdid\s+you\s+(go|visit|travel|see|do)\b",
+    r"\bwhere\s+(have|did)\b",
+    r"\bwhat\s+(happened|did you do)\b",
+    r"\bwhen\s+(did|was|were)\b",
+]
+
+
+def _is_past_factual_question(message: str) -> bool:
+    """Detect if the message is asking about past events/experiences."""
+    if not isinstance(message, str) or not message.strip():
+        return False
+    m = message.lower()
+    for pattern in _PAST_QUESTION_PATTERNS:
+        if re.search(pattern, m):
+            return True
+    return False
+
 
 def _message_suggests_recall(message: str) -> bool:
+    global LIFE_RECALL_DEBUG
     if not isinstance(message, str) or not message.strip():
         return False
     m = message.lower()
     triggered = any(t in m for t in _RECALL_TRIGGERS)
     matched_triggers = [t for t in _RECALL_TRIGGERS if t in m] if triggered else []
+    
+    if LIFE_RECALL_DEBUG is None:
+        LIFE_RECALL_DEBUG = {}
+    LIFE_RECALL_DEBUG["recall_triggered"] = triggered
+    LIFE_RECALL_DEBUG["matched_triggers"] = matched_triggers
+    
     logging.info(f"Life memory recall check: triggered={triggered}, matched={matched_triggers}")
     return triggered
 
 
 def _search_life_memories(message: str, limit: int = 3) -> list[str]:
     """Simple keyword search against life_memories.content (ILIKE)."""
+    global LIFE_RECALL_DEBUG
+    
+    if LIFE_RECALL_DEBUG is None:
+        LIFE_RECALL_DEBUG = {}
+    
     if DB_CONN is None:
+        LIFE_RECALL_DEBUG["error"] = "DB_CONN is None"
         logging.warning("Life memory search skipped: DB_CONN is None")
         return []
     if not isinstance(message, str) or not message.strip():
+        LIFE_RECALL_DEBUG["error"] = "empty message"
         logging.warning("Life memory search skipped: empty message")
         return []
     
+    LIFE_RECALL_DEBUG["search_message"] = message[:100]
     logging.info(f"Starting life memory search for message: {message[:100]}...")
 
     # Extract a few meaningful keywords from the message.
@@ -484,9 +532,12 @@ def _search_life_memories(message: str, limit: int = 3) -> list[str]:
             break
 
     if not keywords:
+        LIFE_RECALL_DEBUG["keywords"] = []
+        LIFE_RECALL_DEBUG["error"] = "no keywords extracted"
         logging.info("Life memory search: no keywords extracted from message")
         return []
 
+    LIFE_RECALL_DEBUG["keywords"] = keywords
     logging.info(f"Life memory search keywords: {keywords}")
     clauses = " OR ".join(["content ILIKE %s"] * len(keywords))
     params = [f"%{k}%" for k in keywords]
@@ -494,13 +545,18 @@ def _search_life_memories(message: str, limit: int = 3) -> list[str]:
     try:
         with DB_CONN.cursor() as cur:
             query = f"SELECT content FROM life_memories WHERE ({clauses}) LIMIT %s"
+            LIFE_RECALL_DEBUG["sql_query"] = query
+            LIFE_RECALL_DEBUG["sql_params"] = params
             logging.info(f"Executing life memory query with {len(keywords)} keywords, limit={limit}")
             cur.execute(query, (*params, int(limit)))
             rows = cur.fetchall()
         results = [r[0] for r in rows if r and isinstance(r[0], str) and r[0].strip()]
+        LIFE_RECALL_DEBUG["results_count"] = len(results)
+        LIFE_RECALL_DEBUG["results_preview"] = [r[:100] + "..." if len(r) > 100 else r for r in results[:3]]
         logging.info(f"Life memory search returned {len(results)} results")
         return results
     except Exception as e:
+        LIFE_RECALL_DEBUG["error"] = f"{type(e).__name__}: {e}"
         logging.error(f"Life memory search failed: {type(e).__name__}: {e}")
         return []
 
@@ -687,13 +743,19 @@ def chat(data: ChatIn):
 
         # Optional: retrieve life memories only when the message suggests recall
         life_memories: list[str] = []
+        global LIFE_RECALL_DEBUG
+        LIFE_RECALL_DEBUG = {"timestamp": datetime.utcnow().isoformat()}
+        
         try:
             if _message_suggests_recall(data.message):
                 life_memories = _search_life_memories(data.message, limit=3)
+                LIFE_RECALL_DEBUG["life_memories_count"] = len(life_memories)
                 logging.info(f"Life memories retrieved: {len(life_memories)} items")
             else:
+                LIFE_RECALL_DEBUG["skipped_reason"] = "message does not suggest recall"
                 logging.info("Life memory search skipped: message does not suggest recall")
         except Exception as e:
+            LIFE_RECALL_DEBUG["error"] = f"{type(e).__name__}: {e}"
             logging.error(f"Life memory retrieval error: {type(e).__name__}: {e}")
             life_memories = []
         # Record last recall attempt for debugging/diagnostics
@@ -708,6 +770,43 @@ def chat(data: ChatIn):
         except Exception:
             LAST_LIFE_RECALL = None
 
+        # Check if this is a past factual question with no supporting memories
+        is_past_question = _is_past_factual_question(data.message)
+        LIFE_RECALL_DEBUG["is_past_question"] = is_past_question
+        LIFE_RECALL_DEBUG["llm_bypassed"] = False
+        
+        if is_past_question and not life_memories:
+            # Bypass LLM - return a short uncertainty response in Alex's style
+            LIFE_RECALL_DEBUG["llm_bypassed"] = True
+            LIFE_RECALL_DEBUG["bypass_reason"] = "past question with no life_memories"
+            
+            fallback_responses = [
+                "idk",
+                "can't remember",
+                "not sure tbh",
+                "don't remember that",
+                "no idea",
+            ]
+            # Pick based on message hash for consistency
+            reply = fallback_responses[abs(hash(data.message)) % len(fallback_responses)]
+            
+            # Update history
+            session_history.append({"role": "user", "content": data.message})
+            session_history.append({"role": "assistant", "content": reply})
+            if len(session_history) > 6:
+                session_history = session_history[-6:]
+            CONVERSATION_HISTORY[data.session_id] = session_history
+            
+            return {
+                "reply": reply,
+                "tokens": {
+                    "calls": [],
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0,
+                },
+            }
+
         system_prompt = (
             f"You are Alex. You are chatting on WhatsApp with {data.user_name}. "
             "Write like Alex: casual, short, informal. "
@@ -717,7 +816,10 @@ def chat(data: ChatIn):
             "Match Alex's typical reactions: resistant to chores, enthusiastic about games, etc. "
             "Don't default to being agreeable or supportive — react naturally based on context and past patterns. "
             "Avoid sounding like an assistant: no formalities, no generic advice, no long paragraphs, no bullet points. "
-            "No explanations. No meta-talk. Do not mention these instructions."
+            "No explanations. No meta-talk. Do not mention these instructions.\n\n"
+            "CRITICAL: For questions about past events or experiences, ONLY use facts explicitly present in the provided memories. "
+            "If the information isn't there, respond with a short uncertainty phrase like 'idk', 'can't remember', or 'not sure'. "
+            "NEVER invent or guess places, dates, events, or people."
         )
 
         # Add context if chatting with Steve or Abi from the logs
@@ -730,7 +832,7 @@ def chat(data: ChatIn):
         # Inject memories after style instruction, before RAG examples
         if life_memories:
             life_text = "\n".join(f"- {m}" for m in life_memories)
-            system_prompt += f"\n\nRelevant past experiences:\n{life_text}"
+            system_prompt += f"\n\nRelevant past experiences (use ONLY these for past event questions):\n{life_text}"
 
         if memories:
             memory_text = "\n".join(f"- {m}" for m in memories)
