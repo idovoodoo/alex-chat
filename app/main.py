@@ -288,8 +288,13 @@ def chat(data: ChatIn):
         messages.append({"role": "user", "content": data.message})
 
         # Model generation - collect token usage per provider
+        # Enforce that the only allowed OpenAI model is `gpt-5-mini`.
+        model = data.model
+        if model.startswith("gpt-") and model != "gpt-5-mini":
+            model = "gpt-5-mini"
+
         reply = ""
-        if data.model.startswith("gemini"):
+        if model.startswith("gemini"):
             # Use Gemini API
             gemini_model = genai.GenerativeModel(data.model)
 
@@ -353,7 +358,7 @@ def chat(data: ChatIn):
         else:
             # Use OpenAI API
             response = client.chat.completions.create(
-                model=data.model,
+                model=model,
                 messages=messages,
             )
 
