@@ -78,7 +78,9 @@ def _load_rag_assets():
     try:
         db_url = os.getenv("SUPABASE_DB_URL")
         if db_url:
+            logging.info("SUPABASE_DB_URL found, attempting connection...")
             DB_CONN = psycopg2.connect(db_url)
+            logging.info("Database connection successful")
             # Load core_memories into MEMORIES
             with DB_CONN.cursor() as cur:
                 cur.execute("SELECT content FROM core_memories ORDER BY id")
@@ -91,6 +93,7 @@ def _load_rag_assets():
             except Exception:
                 logging.info("Loaded core_memories from database (count unknown)")
         else:
+            logging.warning("SUPABASE_DB_URL environment variable not set")
             MEMORIES = None
     except Exception:
         # Log the exception for debugging and clear connection/memories
