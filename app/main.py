@@ -11,6 +11,7 @@ import json
 import psycopg2
 from dotenv import load_dotenv
 import logging
+from urllib.parse import urlparse
 
 import faiss
 import numpy as np
@@ -24,14 +25,17 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 # Load environment variables from .env file
 # Try multiple locations: repo root, dev/chat_chunks/outputs
+_DOTENV_LOADED_FROM = None
+_DOTENV_LOAD_RESULT = None
 _dotenv_locations = [
     os.path.join(_REPO_ROOT, ".env"),
     os.path.join(_REPO_ROOT, "dev", "chat_chunks", "outputs", ".env"),
 ]
 for _dotenv_path in _dotenv_locations:
     if os.path.exists(_dotenv_path):
-        load_dotenv(_dotenv_path)
-        logging.info(f"Loaded .env from: {_dotenv_path}")
+        _DOTENV_LOADED_FROM = _dotenv_path
+        _DOTENV_LOAD_RESULT = bool(load_dotenv(_dotenv_path))
+        logging.info(f"Loaded .env from: {_dotenv_path} (success={_DOTENV_LOAD_RESULT})")
         break
 else:
     logging.warning("No .env file found in expected locations")
@@ -143,11 +147,45 @@ def _db_status():
 @app.get("/debug/db")
 def _debug_db():
     """Detailed database diagnostics for debugging."""
+    supabase_db_url = os.getenv("SUPABASE_DB_URL")
+    parsed = None
+    try:
+        parsed = urlparse(supabase_db_url) if supabase_db_url else None
+    except Exception:
+        parsed = None
+
+    # Detect Render environment (best-effort)
+    render_detected = any(
+        os.getenv(k)
+        for k in (
+            "RENDER",
+            "RENDER_SERVICE_ID",
+            "RENDER_SERVICE_NAME",
+            "RENDER_EXTERNAL_URL",
+            "RENDER_INTERNAL_HOSTNAME",
+        )
+    )
+
     diagnostics = {
-        "env_var_set": bool(os.getenv("SUPABASE_DB_URL")),
+        "render_detected": bool(render_detected),
+        "cwd": os.getcwd(),
+        "repo_root": _REPO_ROOT,
+        "dotenv_loaded_from": _DOTENV_LOADED_FROM,
+        "dotenv_load_result": _DOTENV_LOAD_RESULT,
+        "dotenv_locations": [{"path": p, "exists": os.path.exists(p)} for p in _dotenv_locations],
+        "env_var_set": bool(supabase_db_url),
+        "env_keys_with_supabase": [k for k in os.environ.keys() if "SUPABASE" in k.upper()],
+        # Safe DB URL hints (no credentials)
+        "db_url_scheme": (parsed.scheme if parsed else None),
+        "db_url_host": (parsed.hostname if parsed else None),
+        "db_url_port": (parsed.port if parsed else None),
+        "db_url_db": (parsed.path.lstrip("/") if (parsed and parsed.path) else None),
         "db_conn_object": DB_CONN is not None,
         "memories_loaded": isinstance(MEMORIES, list),
         "memories_count": len(MEMORIES) if isinstance(MEMORIES, list) else 0,
+        # Also show whether other common envs are set (booleans only)
+        "openai_api_key_set": bool(os.getenv("OPENAI_API_KEY")),
+        "gemini_api_key_set": bool(os.getenv("GEMINI_API_KEY")),
     }
     
     # Try a test query
