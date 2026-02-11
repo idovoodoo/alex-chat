@@ -12,6 +12,9 @@ import psycopg2
 from dotenv import load_dotenv
 import logging
 from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlencode, urlunparse
+import socket
+import re
 
 import faiss
 import numpy as np
@@ -83,6 +86,7 @@ def _load_rag_assets():
     try:
         RAG_INDEX = faiss.read_index(faiss_path)
         with open(chunks_path, "r", encoding="utf-8") as f:
+    from datetime import datetime
             RAG_CHUNKS = json.load(f)
         if not isinstance(RAG_CHUNKS, list):
             raise ValueError("chunks.json must be a JSON array")
@@ -97,10 +101,23 @@ def _load_rag_assets():
         db_url = os.getenv("SUPABASE_DB_URL")
         if db_url:
             logging.info("SUPABASE_DB_URL found, attempting connection...")
-            DB_CONN = psycopg2.connect(db_url)
+
+            # Supabase Postgres typically requires SSL. If the URL doesn't specify it,
+            # default to sslmode=require.
+            try:
+                p = urlparse(db_url)
+                q = parse_qs(p.query)
+                if "sslmode" not in q:
+                    q["sslmode"] = ["require"]
+                    db_url = urlunparse(p._replace(query=urlencode(q, doseq=True)))
+            except Exception:
+                pass
+
+            DB_CONN = psycopg2.connect(db_url, connect_timeout=10)
             logging.info("Database connection successful")
             # Load core_memories into MEMORIES
             with DB_CONN.cursor() as cur:
+    LAST_LIFE_RECALL = None
                 cur.execute("SELECT content FROM core_memories ORDER BY id")
                 rows = cur.fetchall()
                 MEMORIES = [row[0] for row in rows if row[0]]
@@ -158,6 +175,13 @@ def _debug_db():
     except Exception:
         parsed = None
 
+    sslmode = None
+    if parsed and parsed.query:
+        try:
+            sslmode = (parse_qs(parsed.query).get("sslmode") or [None])[0]
+        except Exception:
+            sslmode = None
+
     # Detect Render environment (best-effort)
     render_detected = any(
         os.getenv(k)
@@ -184,6 +208,7 @@ def _debug_db():
         "db_url_host": (parsed.hostname if parsed else None),
         "db_url_port": (parsed.port if parsed else None),
         "db_url_db": (parsed.path.lstrip("/") if (parsed and parsed.path) else None),
+        "db_url_sslmode": sslmode,
         "db_conn_object": DB_CONN is not None,
         "db_last_error": DB_LAST_ERROR,
         "memories_loaded": isinstance(MEMORIES, list),
@@ -193,6 +218,15 @@ def _debug_db():
         "gemini_api_key_set": bool(os.getenv("GEMINI_API_KEY")),
     }
     
+    # DNS resolution check (helps debug Render/Supabase hostname issues)
+    if parsed and parsed.hostname:
+        try:
+            diagnostics["dns_lookup"] = socket.gethostbyname(parsed.hostname)
+        except Exception as e:
+            diagnostics["dns_lookup"] = f"failed: {type(e).__name__}: {e}"
+    else:
+        diagnostics["dns_lookup"] = None
+
     # Try a test query
     if DB_CONN:
         try:
@@ -216,7 +250,23 @@ def _debug_db():
             diagnostics["db_row_count"] = f"error: {str(e)}"
     else:
         diagnostics["db_row_count"] = "no connection"
-    
+
+    # Include last life-memory recall info if available
+    try:
+        if LAST_LIFE_RECALL is None:
+            diagnostics["last_life_memory_recall"] = None
+        else:
+            # Make timestamp JSON-serializable
+            lr = LAST_LIFE_RECALL
+            diagnostics["last_life_memory_recall"] = {
+                "time_utc": lr.get("time").isoformat() if lr.get("time") else None,
+                "session_id": lr.get("session_id"),
+                "query_snippet": (lr.get("query")[:200] + "...") if lr.get("query") and len(lr.get("query")) > 200 else lr.get("query"),
+                "results_count": int(lr.get("results_count") or 0),
+            }
+    except Exception:
+        diagnostics["last_life_memory_recall"] = None
+
     return diagnostics
 
 
@@ -314,6 +364,134 @@ def _reload_memories():
         logging.info(f"Reloaded core_memories: {count} items in MEMORIES")
     except Exception:
         logging.info("Reloaded core_memories (count unknown)")
+
+
+_RECALL_TRIGGERS = {
+    "remember",
+    "remind",
+    "when",
+    "trip",
+    "vacation",
+    "holiday",
+    "school",
+    "college",
+    "uni",
+    "university",
+    "high school",
+    "back then",
+    "used to",
+    "last time",
+}
+
+
+def _message_suggests_recall(message: str) -> bool:
+    if not isinstance(message, str) or not message.strip():
+        return False
+    m = message.lower()
+    return any(t in m for t in _RECALL_TRIGGERS)
+
+
+def _search_life_memories(message: str, limit: int = 3) -> list[str]:
+    """Simple keyword search against life_memories.content (ILIKE)."""
+    if DB_CONN is None:
+        return []
+    if not isinstance(message, str) or not message.strip():
+        return []
+
+    # Extract a few meaningful keywords from the message.
+    tokens = [t.lower() for t in re.findall(r"[a-zA-Z0-9']+", message)]
+    stop = {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "but",
+        "by",
+        "do",
+        "did",
+        "does",
+        "for",
+        "from",
+        "had",
+        "has",
+        "have",
+        "how",
+        "i",
+        "i'm",
+        "im",
+        "in",
+        "is",
+        "it",
+        "like",
+        "me",
+        "my",
+        "of",
+        "on",
+        "or",
+        "our",
+        "so",
+        "that",
+        "the",
+        "their",
+        "then",
+        "there",
+        "they",
+        "this",
+        "to",
+        "us",
+        "was",
+        "we",
+        "were",
+        "what",
+        "when",
+        "where",
+        "who",
+        "why",
+        "with",
+        "you",
+        "your",
+        "remember",
+        "remind",
+        "trip",
+        "school",
+        "back",
+        "time",
+        "used",
+    }
+
+    keywords: list[str] = []
+    seen: set[str] = set()
+    for t in tokens:
+        if len(t) < 4:
+            continue
+        if t in stop:
+            continue
+        if t in seen:
+            continue
+        seen.add(t)
+        keywords.append(t)
+        if len(keywords) >= 6:
+            break
+
+    if not keywords:
+        return []
+
+    clauses = " OR ".join(["content ILIKE %s"] * len(keywords))
+    params = [f"%{k}%" for k in keywords]
+
+    try:
+        with DB_CONN.cursor() as cur:
+            cur.execute(
+                f"SELECT content FROM life_memories WHERE ({clauses}) LIMIT %s",
+                (*params, int(limit)),
+            )
+            rows = cur.fetchall()
+        return [r[0] for r in rows if r and isinstance(r[0], str) and r[0].strip()]
+    except Exception:
+        return []
 
 
 def _summarize_conversation(session_history: list) -> str:
@@ -496,6 +674,25 @@ def chat(data: ChatIn):
         # Get memories to inject into prompt
         memories = _select_memories(data.message, k=5)
 
+        # Optional: retrieve life memories only when the message suggests recall
+        life_memories: list[str] = []
+        try:
+            if _message_suggests_recall(data.message):
+                life_memories = _search_life_memories(data.message, limit=3)
+        except Exception:
+            life_memories = []
+        # Record last recall attempt for debugging/diagnostics
+        try:
+            global LAST_LIFE_RECALL
+            LAST_LIFE_RECALL = {
+                "time": datetime.utcnow(),
+                "session_id": data.session_id,
+                "query": data.message[:400],
+                "results_count": len(life_memories) if life_memories else 0,
+            }
+        except Exception:
+            LAST_LIFE_RECALL = None
+
         system_prompt = (
             f"You are Alex. You are chatting on WhatsApp with {data.user_name}. "
             "Write like Alex: casual, short, informal. "
@@ -516,6 +713,10 @@ def chat(data: ChatIn):
             )
 
         # Inject memories after style instruction, before RAG examples
+        if life_memories:
+            life_text = "\n".join(f"- {m}" for m in life_memories)
+            system_prompt += f"\n\nRelevant past experiences:\n{life_text}"
+
         if memories:
             memory_text = "\n".join(f"- {m}" for m in memories)
             system_prompt += f"\n\nKnown facts:\n{memory_text}"
