@@ -148,6 +148,106 @@ def _select_memories(query: str, k: int = 5) -> list[str]:
     return MEMORIES[:k]
 
 
+def _reload_memories():
+    """Reload memories from the JSON file into the global MEMORIES variable."""
+    global MEMORIES
+    memory_path = os.getenv("MEMORY_PATH", _DEFAULT_MEMORY_PATH)
+    try:
+        with open(memory_path, "r", encoding="utf-8") as f:
+            MEMORIES = json.load(f)
+        if not isinstance(MEMORIES, list):
+            MEMORIES = None
+    except Exception:
+        MEMORIES = None
+
+
+def _summarize_conversation(session_history: list) -> str:
+    """Summarize a conversation into 1-2 short factual memory lines.
+    
+    Returns third-person, factual statements with no emotions, opinions, or temporary details.
+    Returns empty string if the conversation is too short or summarization fails.
+    """
+    if not session_history or len(session_history) < 2:
+        return ""
+    
+    # Build conversation text
+    conversation_text = ""
+    for msg in session_history:
+        if msg["role"] == "user":
+            conversation_text += f"User: {msg['content']}\n"
+        elif msg["role"] == "assistant":
+            conversation_text += f"Alex: {msg['content']}\n"
+    
+    # Create summarization prompt
+    summary_prompt = (
+        "Summarize this WhatsApp conversation into 1-2 short factual memory lines. "
+        "Requirements:\n"
+        "- Write in third person\n"
+        "- Include only facts, no emotions or opinions\n"
+        "- Exclude temporary details (times, dates, immediate plans)\n"
+        "- Focus on lasting facts about Alex's life, relationships, or preferences\n"
+        "- Each line should be a complete, standalone sentence\n"
+        "- If there are no important lasting facts, return NONE\n\n"
+        f"Conversation:\n{conversation_text}\n\n"
+        "Memory (1-2 lines only):"
+    )
+    
+    try:
+        # Use OpenAI to generate summary
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": summary_prompt}],
+            temperature=0.3,
+            max_tokens=100
+        )
+        
+        summary = response.choices[0].message.content.strip()
+        
+        # Skip if model says there's nothing important
+        if summary.upper() == "NONE" or not summary:
+            return ""
+        
+        return summary
+    except Exception:
+        return ""
+
+
+def _save_memory(memory_line: str):
+    """Append a memory line to memories.json and reload MEMORIES.
+    
+    Args:
+        memory_line: A single memory string or multiple lines separated by newlines
+    """
+    if not memory_line or not memory_line.strip():
+        return
+    
+    memory_path = os.getenv("MEMORY_PATH", _DEFAULT_MEMORY_PATH)
+    
+    try:
+        # Load existing memories
+        existing_memories = []
+        if os.path.exists(memory_path):
+            with open(memory_path, "r", encoding="utf-8") as f:
+                existing_memories = json.load(f)
+                if not isinstance(existing_memories, list):
+                    existing_memories = []
+        
+        # Split multi-line memory into individual lines
+        new_memories = [line.strip() for line in memory_line.split("\n") if line.strip()]
+        
+        # Append new memories
+        existing_memories.extend(new_memories)
+        
+        # Save back to file
+        with open(memory_path, "w", encoding="utf-8") as f:
+            json.dump(existing_memories, f, indent=2, ensure_ascii=False)
+        
+        # Reload global MEMORIES
+        _reload_memories()
+    except Exception:
+        pass
+
+
 def _trim_chunk_for_prompt(chunk: str, max_lines: int = 4) -> str:
     """Trim a RAG chunk to its last `max_lines` lines, but ensure Alex's most recent messages are preserved.
 
@@ -437,6 +537,38 @@ def chat(data: ChatIn):
                 "output_tokens": int(total_output),
                 "total_tokens": int(total_all),
             },
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+class NewChatIn(BaseModel):
+    session_id: str = "default"
+
+
+@app.post("/new_chat")
+def new_chat(data: NewChatIn):
+    """End the current chat session and start a new one.
+    
+    Summarizes the previous conversation and saves it to memories.json.
+    """
+    try:
+        # Get the conversation history for this session
+        session_history = CONVERSATION_HISTORY.get(data.session_id, [])
+        
+        # If there's conversation history, summarize and save it
+        if session_history:
+            summary = _summarize_conversation(session_history)
+            if summary:
+                _save_memory(summary)
+        
+        # Clear the conversation history for this session
+        if data.session_id in CONVERSATION_HISTORY:
+            del CONVERSATION_HISTORY[data.session_id]
+        
+        return {
+            "status": "ok",
+            "message": "New chat started",
+            "summary_saved": bool(session_history and summary)
         }
     except Exception as e:
         return {"error": str(e)}
