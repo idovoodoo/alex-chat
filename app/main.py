@@ -10,6 +10,7 @@ import os
 import json
 import psycopg2
 from dotenv import load_dotenv
+import logging
 
 import faiss
 import numpy as np
@@ -17,6 +18,9 @@ import math
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Basic logging
+logging.basicConfig(level=logging.INFO)
 
 
 app = FastAPI()
@@ -80,11 +84,25 @@ def _load_rag_assets():
                 cur.execute("SELECT content FROM core_memories ORDER BY id")
                 rows = cur.fetchall()
                 MEMORIES = [row[0] for row in rows if row[0]]
+            # Log how many memories were loaded
+            try:
+                count = len(MEMORIES) if isinstance(MEMORIES, list) else 0
+                logging.info(f"Loaded {count} core_memories from database")
+            except Exception:
+                logging.info("Loaded core_memories from database (count unknown)")
         else:
             MEMORIES = None
     except Exception:
+        # Log the exception for debugging and clear connection/memories
+        logging.exception("Failed to connect to Supabase/Postgres or load core_memories")
         DB_CONN = None
         MEMORIES = None
+    finally:
+        # Diagnostic log whether DB_CONN appears connected
+        if DB_CONN:
+            logging.info("Database connection established")
+        else:
+            logging.info("Database not connected")
 
 
 @app.get("/db_status")
@@ -92,13 +110,18 @@ def _db_status():
     """Return whether the application can reach the configured Supabase/Postgres DB."""
     try:
         if DB_CONN is None:
-            return {"connected": False}
+            return {"connected": False, "core_memories_count": 0}
         with DB_CONN.cursor() as cur:
             cur.execute("SELECT 1")
             cur.fetchone()
-        return {"connected": True}
+        # include loaded memories count for diagnostics
+        try:
+            count = len(MEMORIES) if isinstance(MEMORIES, list) else 0
+        except Exception:
+            count = 0
+        return {"connected": True, "core_memories_count": int(count)}
     except Exception:
-        return {"connected": False}
+        return {"connected": False, "core_memories_count": 0}
 
 
 def estimate_tokens(text: str) -> int:
@@ -188,6 +211,13 @@ def _reload_memories():
             MEMORIES = None
     except Exception:
         MEMORIES = None
+
+    # Log how many memories are currently loaded
+    try:
+        count = len(MEMORIES) if isinstance(MEMORIES, list) else 0
+        logging.info(f"Reloaded core_memories: {count} items in MEMORIES")
+    except Exception:
+        logging.info("Reloaded core_memories (count unknown)")
 
 
 def _summarize_conversation(session_history: list) -> str:
