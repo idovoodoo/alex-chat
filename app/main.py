@@ -732,18 +732,18 @@ def _summarize_conversation(session_history: list) -> str:
         LAST_NEW_CHAT_DEBUG["conversation_preview"] = conversation_text[:200] + "..." if len(conversation_text) > 200 else conversation_text
     
     # Create strict summarization prompt
+    # GPT-5 models use thinking tokens, so we need to be explicit about output format
     summary_prompt = (
-        "Extract ONE durable factual memory from this conversation.\n"
+        "Extract ONE durable factual memory from this conversation.\n\n"
         "Requirements:\n"
-        "- Third person\n"
+        "- Third person (e.g., 'User went skiing in France')\n"
         "- Present tense\n"
-        "- No emotions\n"
+        "- One factual statement only\n"
+        "- No emotions or opinions\n"
         "- No temporary details\n"
-        "- No speculation\n"
-        "- Return ONLY ONE sentence\n"
-        "- If no durable fact exists, return: NONE\n\n"
+        "- If no durable fact exists, output exactly: NONE\n\n"
         f"Conversation:\n{conversation_text}\n\n"
-        "Memory:"
+        "Output only the memory sentence (or NONE):"
     )
     
     try:
@@ -751,13 +751,13 @@ def _summarize_conversation(session_history: list) -> str:
         if isinstance(LAST_NEW_CHAT_DEBUG, dict):
             LAST_NEW_CHAT_DEBUG["llm_call_1"] = "started"
         
-        # GPT-5 models can spend a lot of tokens on reasoning; keep enough headroom
-        # so we reliably get an actual output sentence.
+        # GPT-5 models use thinking tokens internally, so we need high max_tokens
+        # to ensure there's budget left for actual output after reasoning.
         # Note: GPT-5-mini only supports default temperature (1)
         summary, usage = _openai_chat_completion(
             model="gpt-5-mini",
             messages=[{"role": "user", "content": summary_prompt}],
-            max_tokens=256,
+            max_tokens=1024,
         )
         
         # Track token usage
@@ -779,39 +779,8 @@ def _summarize_conversation(session_history: list) -> str:
         logging.info(f"_summarize_conversation: LLM returned: '{summary}'")
         if isinstance(LAST_NEW_CHAT_DEBUG, dict):
             LAST_NEW_CHAT_DEBUG["llm_call_1_result"] = summary
-
-        # Retry once if the model produced no visible output (e.g. used budget on reasoning).
-        if not summary:
-            logging.info("_summarize_conversation: retrying with higher token limit...")
-            if isinstance(LAST_NEW_CHAT_DEBUG, dict):
-                LAST_NEW_CHAT_DEBUG["llm_call_2"] = "started (retry)"
-            
-            summary, usage = _openai_chat_completion(
-                model="gpt-5-mini",
-                messages=[{"role": "user", "content": summary_prompt}],
-                max_tokens=512,
-            )
-            
-            if isinstance(LAST_NEW_CHAT_DEBUG, dict) and usage:
-                if isinstance(usage, dict):
-                    LAST_NEW_CHAT_DEBUG["llm_call_2_tokens"] = {
-                        "input": usage.get("prompt_tokens", 0),
-                        "output": usage.get("completion_tokens", 0),
-                        "total": usage.get("total_tokens", 0)
-                    }
-                else:
-                    LAST_NEW_CHAT_DEBUG["llm_call_2_tokens"] = {
-                        "input": getattr(usage, "prompt_tokens", 0),
-                        "output": getattr(usage, "completion_tokens", 0),
-                        "total": getattr(usage, "total_tokens", 0)
-                    }
-            
-            summary = (summary or "").strip()
-            logging.info(f"_summarize_conversation: LLM retry returned: '{summary}'")
-            if isinstance(LAST_NEW_CHAT_DEBUG, dict):
-                LAST_NEW_CHAT_DEBUG["llm_call_2_result"] = summary
         
-        # Skip if model says there's nothing important
+        # Skip if model says there's nothing important or returned empty
         if summary.upper() == "NONE" or not summary:
             logging.info("_summarize_conversation: no durable memory found")
             if isinstance(LAST_NEW_CHAT_DEBUG, dict):
