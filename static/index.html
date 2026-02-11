@@ -703,7 +703,7 @@
             
             // If no chats exist, create a new one
             if (Object.keys(chats).length === 0) {
-                createNewChat();
+                createNewChatLocal();
             } else {
                 // Load the most recent chat
                 const chatIds = Object.keys(chats).sort((a, b) => chats[b].lastUpdated - chats[a].lastUpdated);
@@ -719,8 +719,8 @@
             localStorage.setItem(`alex_chats_${currentUser}`, JSON.stringify(chats));
         }
 
-        // Create a new chat
-        function createNewChat() {
+        // Create a new chat locally (no server call)
+        function createNewChatLocal() {
             const chatId = 'chat_' + Date.now();
             chats[chatId] = {
                 id: chatId,
@@ -734,6 +734,28 @@
             saveChats();
             loadChat(chatId);
             renderChatList();
+        }
+
+        // End the current chat on the server (extract memory), then start a new local chat
+        async function endCurrentChatAndStartNew() {
+            try {
+                if (currentChatId && chats[currentChatId]) {
+                    const oldChat = chats[currentChatId];
+                    if (oldChat && oldChat.sessionId) {
+                        await fetch('/new_chat', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ session_id: oldChat.sessionId })
+                        });
+                        if (typeof fetchDebugInfo === 'function') fetchDebugInfo();
+                        if (typeof checkDbStatus === 'function') checkDbStatus();
+                    }
+                }
+            } catch (e) {
+                // If server summarization fails, still start a new chat locally.
+            } finally {
+                createNewChatLocal();
+            }
         }
 
         // Load a specific chat
@@ -805,7 +827,7 @@
                         if (ids.length > 0) {
                             loadChat(ids[0]);
                         } else {
-                            createNewChat();
+                            createNewChatLocal();
                         }
                     }
                     saveChats();
@@ -1002,7 +1024,7 @@
             }
         });
 
-        newChatBtn.addEventListener('click', createNewChat);
+    newChatBtn.addEventListener('click', endCurrentChatAndStartNew);
         
         toggleSidebarBtn.addEventListener('click', () => {
             sidebar.classList.toggle('hidden');

@@ -4,7 +4,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from openai import OpenAI
+try:
+    # openai>=1.x
+    from openai import OpenAI  # type: ignore
+    _OPENAI_V1 = True
+except Exception:  # pragma: no cover
+    # openai<1.x fallback
+    OpenAI = None  # type: ignore
+    _OPENAI_V1 = False
+    import openai  # type: ignore
 import google.generativeai as genai
 import os
 import json
@@ -57,7 +65,57 @@ app.add_middleware(
 
 
 # OpenAI v1 client using API key from environment (Render sets this)
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+if _OPENAI_V1:
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+else:
+    openai.api_key = os.getenv("OPENAI_API_KEY")
+    client = openai
+
+
+def _openai_chat_completion(*, model: str, messages: list[dict], temperature: float | None = None, max_tokens: int | None = None):
+    """Compatibility wrapper for OpenAI chat completions across SDK versions."""
+    if _OPENAI_V1:
+        kwargs = {"model": model, "messages": messages}
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        if max_tokens is not None:
+            # GPT-5 models use `max_completion_tokens` instead of `max_tokens`.
+            if isinstance(model, str) and model.startswith("gpt-5"):
+                kwargs["max_completion_tokens"] = max_tokens
+            else:
+                kwargs["max_tokens"] = max_tokens
+        resp = client.chat.completions.create(**kwargs)
+        # v1: reply in resp.choices[0].message.content
+        choice0 = resp.choices[0]
+        reply_text = choice0.message.content
+        usage = getattr(resp, "usage", None)
+        return reply_text, usage
+
+    # openai<1.x
+    kwargs = {"model": model, "messages": messages}
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
+    resp = client.ChatCompletion.create(**kwargs)
+    reply_text = resp["choices"][0]["message"]["content"]
+    usage = resp.get("usage")
+    return reply_text, usage
+
+
+def _openai_embedding(*, model: str, input_text: str):
+    """Compatibility wrapper for OpenAI embeddings across SDK versions."""
+    if _OPENAI_V1:
+        resp = client.embeddings.create(model=model, input=input_text)
+        data0 = resp.data[0]
+        vec = data0.embedding
+        usage = getattr(resp, "usage", None)
+        return vec, usage
+
+    resp = client.Embedding.create(model=model, input=input_text)
+    vec = resp["data"][0]["embedding"]
+    usage = resp.get("usage")
+    return vec, usage
 
 # Configure Gemini API
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
@@ -75,6 +133,7 @@ DB_CONN = None
 DB_LAST_ERROR = None
 LAST_LIFE_RECALL = None
 LIFE_RECALL_DEBUG = None
+LAST_NEW_CHAT_DEBUG = None
 
 # In-memory conversation history per session
 CONVERSATION_HISTORY = {}
@@ -264,6 +323,13 @@ def _debug_db():
         "remember_when_patterns": len(_REMEMBER_WHEN_PATTERNS),
         "past_question_patterns": len(_PAST_QUESTION_PATTERNS),
     }
+
+    # Include last new-chat (conversation summarization) info
+    diagnostics["_section_last_new_chat"] = "=== LAST NEW CHAT (MEMORY EXTRACTION) ==="
+    try:
+        diagnostics["last_new_chat"] = LAST_NEW_CHAT_DEBUG if isinstance(LAST_NEW_CHAT_DEBUG, dict) else "No /new_chat calls yet"
+    except Exception as e:
+        diagnostics["last_new_chat"] = f"error: {str(e)}"
     
     # Try to count memories in DB (unified table)
     if _ensure_db_connection():
@@ -329,23 +395,14 @@ def _embed_text(text: str) -> tuple[np.ndarray, int]:
     Returns (vector, tokens_used). If the embedding response includes a usage
     field we use it; otherwise we fall back to `estimate_tokens`.
     """
-    emb = client.embeddings.create(
-        model="text-embedding-3-small",
-        input=text,
-    )
+    vec, usage = _openai_embedding(model="text-embedding-3-small", input_text=text)
 
-    # Handle attribute-accessible or dict-like responses
-    data0 = emb.data[0] if hasattr(emb, "data") else emb["data"][0]
-    vec = data0.embedding if hasattr(data0, "embedding") else data0["embedding"]
-
-    # Try to extract usage if present
     tokens_used = None
-    if hasattr(emb, "usage"):
-        u = emb.usage
-        tokens_used = getattr(u, "prompt_tokens", None) or getattr(u, "total_tokens", None)
-    elif isinstance(emb, dict) and "usage" in emb:
-        u = emb["usage"]
-        tokens_used = u.get("prompt_tokens") or u.get("total_tokens")
+    if usage is not None:
+        if isinstance(usage, dict):
+            tokens_used = usage.get("prompt_tokens") or usage.get("total_tokens")
+        else:
+            tokens_used = getattr(usage, "prompt_tokens", None) or getattr(usage, "total_tokens", None)
 
     if tokens_used is None:
         tokens_used = estimate_tokens(text)
@@ -662,15 +719,26 @@ def _summarize_conversation(session_history: list) -> str:
     )
     
     try:
-        # Use OpenAI to generate summary
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
+        # GPT-5 models can spend a lot of tokens on reasoning; keep enough headroom
+        # so we reliably get an actual output sentence.
+        summary, _ = _openai_chat_completion(
+            model="gpt-5-mini",
             messages=[{"role": "user", "content": summary_prompt}],
-            temperature=0.3,
-            max_tokens=100
+            temperature=0.2,
+            max_tokens=256,
         )
-        
-        summary = response.choices[0].message.content.strip()
+
+        summary = (summary or "").strip()
+
+        # Retry once if the model produced no visible output (e.g. used budget on reasoning).
+        if not summary:
+            summary, _ = _openai_chat_completion(
+                model="gpt-5-mini",
+                messages=[{"role": "user", "content": summary_prompt}],
+                temperature=0.2,
+                max_tokens=512,
+            )
+            summary = (summary or "").strip()
         
         # Skip if model says there's nothing important
         if summary.upper() == "NONE" or not summary:
@@ -868,8 +936,12 @@ def root():
 @app.post("/chat")
 def chat(data: ChatIn):
     try:
-        # Retrieve conversation history for this session
-        session_history = CONVERSATION_HISTORY.get(data.session_id, [])
+        # Retrieve (or create) conversation history for this session.
+        # Keep a stable, per-session list so we never lose prior turns.
+        session_history = CONVERSATION_HISTORY.get(data.session_id)
+        if not isinstance(session_history, list):
+            session_history = []
+            CONVERSATION_HISTORY[data.session_id] = session_history
 
         # We'll track tokens used across all API calls for this request
         token_calls: list[dict] = []
@@ -1048,10 +1120,8 @@ def chat(data: ChatIn):
                 f"{joined}"
             )
 
-        # Build messages list: system prompt + history + current message
-        messages = [{"role": "system", "content": system_prompt}]
-        messages.extend(session_history)  # Inject conversation history
-        messages.append({"role": "user", "content": data.message})
+        # Build messages list: system prompt + full session history + current user message
+        messages = [{"role": "system", "content": system_prompt}, *session_history, {"role": "user", "content": data.message}]
 
         # Model generation - collect token usage per provider
         # Enforce that the only allowed OpenAI model is `gpt-5-mini`.
@@ -1123,62 +1193,36 @@ def chat(data: ChatIn):
             reply = reply_text
         else:
             # Use OpenAI API
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-            )
+            reply, usage = _openai_chat_completion(model=model, messages=messages)
 
-            # response structure may be attribute-accessible or dict-like; handle both
-            choice = response.choices[0] if hasattr(response, "choices") else response["choices"][0]
-            if hasattr(choice, "message") and hasattr(choice.message, "content"):
-                reply = choice.message.content
-            else:
-                reply = choice["message"]["content"]
-
-            # Try to extract usage from the response
-            usage = None
-            if hasattr(response, "usage"):
-                usage = response.usage
-            elif isinstance(response, dict) and "usage" in response:
-                usage = response["usage"]
+            input_t = None
+            output_t = None
+            total_t = None
 
             if usage is not None:
-                # usage may be attribute-like or dict-like
-                if hasattr(usage, "prompt_tokens") or hasattr(usage, "completion_tokens"):
-                    input_t = getattr(usage, "prompt_tokens", None) or getattr(usage, "prompt_tokens", None)
-                    output_t = getattr(usage, "completion_tokens", None) or getattr(usage, "completion_tokens", None)
-                    total_t = getattr(usage, "total_tokens", None) or getattr(usage, "total_tokens", None)
+                if isinstance(usage, dict):
+                    input_t = usage.get("prompt_tokens")
+                    output_t = usage.get("completion_tokens")
+                    total_t = usage.get("total_tokens")
                 else:
-                    input_t = usage.get("prompt_tokens") if isinstance(usage, dict) else None
-                    output_t = usage.get("completion_tokens") if isinstance(usage, dict) else None
-                    total_t = usage.get("total_tokens") if isinstance(usage, dict) else None
+                    input_t = getattr(usage, "prompt_tokens", None)
+                    output_t = getattr(usage, "completion_tokens", None)
+                    total_t = getattr(usage, "total_tokens", None)
 
-                # fallbacks
-                if input_t is None:
-                    input_t = estimate_tokens(json.dumps(messages))
-                if output_t is None:
-                    output_t = estimate_tokens(reply)
-                if total_t is None:
-                    total_t = int(input_t) + int(output_t)
+            if input_t is None:
+                input_t = estimate_tokens(json.dumps(messages))
+            if output_t is None:
+                output_t = estimate_tokens(reply)
+            if total_t is None:
+                total_t = int(input_t) + int(output_t)
 
-                token_calls.append({
-                    "name": "openai_chat",
-                    "input_tokens": int(input_t),
-                    "output_tokens": int(output_t),
-                    "total_tokens": int(total_t),
-                    "note": "reported" if (hasattr(usage, "total_tokens") or (isinstance(usage, dict) and "total_tokens" in usage)) else "estimated",
-                })
-            else:
-                # No usage reported: estimate
-                in_est = estimate_tokens(json.dumps(messages))
-                out_est = estimate_tokens(reply)
-                token_calls.append({
-                    "name": "openai_chat",
-                    "input_tokens": int(in_est),
-                    "output_tokens": int(out_est),
-                    "total_tokens": int(in_est) + int(out_est),
-                    "note": "estimated",
-                })
+            token_calls.append({
+                "name": "openai_chat",
+                "input_tokens": int(input_t),
+                "output_tokens": int(output_t),
+                "total_tokens": int(total_t),
+                "note": "reported" if total_t is not None and usage is not None else "estimated",
+            })
         
         # Update conversation history with user message and assistant reply
         session_history.append({"role": "user", "content": data.message})
@@ -1261,9 +1305,17 @@ def new_chat(data: NewChatIn):
     Summarizes the previous conversation, checks for duplicates using embedding similarity,
     and saves to the unified memories table (type='life') if not a duplicate.
     """
+    global LAST_NEW_CHAT_DEBUG
+    LAST_NEW_CHAT_DEBUG = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "session_id": data.session_id,
+    }
+
     try:
         # Get the conversation history for this session
         session_history = CONVERSATION_HISTORY.get(data.session_id, [])
+
+        LAST_NEW_CHAT_DEBUG["history_messages"] = int(len(session_history) if isinstance(session_history, list) else 0)
         
         summary_saved = False
         duplicate_detected = False
@@ -1274,12 +1326,15 @@ def new_chat(data: NewChatIn):
             # Extract ONE durable factual memory
             summary = _summarize_conversation(session_history)
             extracted_memory = summary
+
+            LAST_NEW_CHAT_DEBUG["extracted_memory"] = summary
             
             # Log extracted memory for debugging
             if summary:
                 logging.info(f"Extracted memory: {summary}")
             else:
                 logging.info("No durable memory extracted from conversation")
+                LAST_NEW_CHAT_DEBUG["note"] = "no durable memory extracted"
             
             if summary:
                 # Check for duplicates using cosine similarity (threshold 0.85) against life memories
@@ -1293,10 +1348,15 @@ def new_chat(data: NewChatIn):
                     _save_life_memory(summary)
                     summary_saved = True
                     logging.info(f"New life_memory saved: {summary}")
+        else:
+            LAST_NEW_CHAT_DEBUG["note"] = "no session history"
         
         # Clear the conversation history for this session
         if data.session_id in CONVERSATION_HISTORY:
             del CONVERSATION_HISTORY[data.session_id]
+
+        LAST_NEW_CHAT_DEBUG["summary_saved"] = bool(summary_saved)
+        LAST_NEW_CHAT_DEBUG["duplicate_detected"] = bool(duplicate_detected)
         
         return {
             "status": "ok",
@@ -1307,4 +1367,8 @@ def new_chat(data: NewChatIn):
         }
     except Exception as e:
         logging.error(f"Error in new_chat: {type(e).__name__}: {e}")
+        try:
+            LAST_NEW_CHAT_DEBUG["error"] = f"{type(e).__name__}: {e}"
+        except Exception:
+            pass
         return {"error": str(e)}
