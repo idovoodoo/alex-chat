@@ -16,11 +16,25 @@ import faiss
 import numpy as np
 import math
 
-# Load environment variables from .env file
-load_dotenv()
-
-# Basic logging
+# Basic logging - configure before any logging calls
 logging.basicConfig(level=logging.INFO)
+
+# Determine repo root early for .env loading
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+# Load environment variables from .env file
+# Try multiple locations: repo root, dev/chat_chunks/outputs
+_dotenv_locations = [
+    os.path.join(_REPO_ROOT, ".env"),
+    os.path.join(_REPO_ROOT, "dev", "chat_chunks", "outputs", ".env"),
+]
+for _dotenv_path in _dotenv_locations:
+    if os.path.exists(_dotenv_path):
+        load_dotenv(_dotenv_path)
+        logging.info(f"Loaded .env from: {_dotenv_path}")
+        break
+else:
+    logging.warning("No .env file found in expected locations")
 
 
 app = FastAPI()
@@ -42,7 +56,6 @@ genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 
 # --- Minimal FAISS RAG wiring (loads at startup) ---
-_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 _DEFAULT_FAISS_PATH = os.path.join(_REPO_ROOT, "dev", "chat_chunks", "outputs", "index.faiss")
 _DEFAULT_CHUNKS_PATH = os.path.join(_REPO_ROOT, "dev", "chat_chunks", "outputs", "chunks.json")
 
