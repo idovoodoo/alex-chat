@@ -444,6 +444,16 @@
         #model-selector:hover {
             background: #f0f0f0;
         }
+
+        #token-usage {
+            font-size: 12px;
+            color: #e0e0e0;
+            margin-left: 12px;
+            background: rgba(255,255,255,0.06);
+            padding: 6px 10px;
+            border-radius: 8px;
+            font-weight: 600;
+        }
     </style>
 </head>
 <body>
@@ -495,6 +505,7 @@
                         <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash Lite</option>
                     </select>
                 </div>
+                <div id="token-usage">In: - | Out: -</div>
             </header>
             
             <div id="chat-container">
@@ -532,6 +543,7 @@
         const userNameInput = document.getElementById('user-name-input');
         const currentUserDisplay = document.getElementById('current-user-display');
         const modelSelector = document.getElementById('model-selector');
+        const tokenUsageEl = document.getElementById('token-usage');
 
         // User management
         let currentUser = null;
@@ -805,10 +817,30 @@
 
                 if (data.reply) {
                     addMessage('Alex', data.reply);
+                    // Update token usage UI if provided
+                    if (data.tokens) {
+                        try {
+                            const inT = data.tokens.input_tokens ?? data.tokens.input ?? 0;
+                            const outT = data.tokens.output_tokens ?? data.tokens.output ?? 0;
+                            tokenUsageEl.textContent = `In: ${inT} | Out: ${outT}`;
+                            // Set tooltip with breakdown
+                            tokenUsageEl.title = JSON.stringify(data.tokens.calls || data.tokens, null, 2);
+                        } catch (e) {
+                            tokenUsageEl.textContent = 'In: - | Out: -';
+                            tokenUsageEl.title = '';
+                        }
+                    } else {
+                        tokenUsageEl.textContent = 'In: - | Out: -';
+                        tokenUsageEl.title = '';
+                    }
                 } else if (data.error) {
                     addMessage('System', 'Error: ' + data.error);
+                    tokenUsageEl.textContent = 'In: - | Out: -';
+                    tokenUsageEl.title = '';
                 } else {
                     addMessage('System', 'Unexpected response format');
+                    tokenUsageEl.textContent = 'In: - | Out: -';
+                    tokenUsageEl.title = '';
                 }
             } catch (error) {
                 showTyping(false);

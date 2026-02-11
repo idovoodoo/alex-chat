@@ -10,6 +10,7 @@ import json
 
 import faiss
 import numpy as np
+import math
 
 
 app = FastAPI()
@@ -73,8 +74,23 @@ def _load_rag_assets():
         MEMORIES = None
 
 
-def _embed_text(text: str) -> np.ndarray:
-    """Returns a (d,) float32 embedding vector."""
+def estimate_tokens(text: str) -> int:
+    """Rudimentary token estimator when exact usage isn't available.
+
+    This uses a simple heuristic (roughly 4 chars per token). If the
+    model response includes explicit usage fields we'll use those instead.
+    """
+    if not text:
+        return 0
+    return max(1, math.ceil(len(text) / 4))
+
+
+def _embed_text(text: str) -> tuple[np.ndarray, int]:
+    """Returns a (d,) float32 embedding vector and an estimated/observed token count.
+
+    Returns (vector, tokens_used). If the embedding response includes a usage
+    field we use it; otherwise we fall back to `estimate_tokens`.
+    """
     emb = client.embeddings.create(
         model="text-embedding-3-small",
         input=text,
@@ -83,14 +99,31 @@ def _embed_text(text: str) -> np.ndarray:
     # Handle attribute-accessible or dict-like responses
     data0 = emb.data[0] if hasattr(emb, "data") else emb["data"][0]
     vec = data0.embedding if hasattr(data0, "embedding") else data0["embedding"]
-    return np.asarray(vec, dtype=np.float32)
+
+    # Try to extract usage if present
+    tokens_used = None
+    if hasattr(emb, "usage"):
+        u = emb.usage
+        tokens_used = getattr(u, "prompt_tokens", None) or getattr(u, "total_tokens", None)
+    elif isinstance(emb, dict) and "usage" in emb:
+        u = emb["usage"]
+        tokens_used = u.get("prompt_tokens") or u.get("total_tokens")
+
+    if tokens_used is None:
+        tokens_used = estimate_tokens(text)
+
+    return np.asarray(vec, dtype=np.float32), int(tokens_used)
 
 
-def _retrieve_top_chunks(query: str, k: int = 2) -> list[str]:
+def _retrieve_top_chunks(query: str, k: int = 2) -> tuple[list[str], int]:
+    """Returns (results, tokens_used_by_embedding).
+
+    If FAISS or chunks aren't available returns ([], 0).
+    """
     if RAG_INDEX is None or RAG_CHUNKS is None:
-        return []
+        return [], 0
 
-    q = _embed_text(query)
+    q, emb_tokens = _embed_text(query)
     # FAISS expects shape (n, d)
     q2 = np.expand_dims(q, axis=0)
 
@@ -105,7 +138,7 @@ def _retrieve_top_chunks(query: str, k: int = 2) -> list[str]:
             chunk = RAG_CHUNKS[int(i)]
             if isinstance(chunk, str) and chunk.strip():
                 results.append(chunk.strip())
-    return results
+    return results, int(emb_tokens)
 
 
 def _select_memories(query: str, k: int = 5) -> list[str]:
@@ -183,10 +216,21 @@ def chat(data: ChatIn):
     try:
         # Retrieve conversation history for this session
         session_history = CONVERSATION_HISTORY.get(data.session_id, [])
-        
+
+        # We'll track tokens used across all API calls for this request
+        token_calls: list[dict] = []
+
         examples = []
         try:
-            examples = _retrieve_top_chunks(data.message, k=2)
+            examples, retrieval_tokens = _retrieve_top_chunks(data.message, k=2)
+            if retrieval_tokens:
+                token_calls.append({
+                    "name": "retrieval_embedding",
+                    "input_tokens": int(retrieval_tokens),
+                    "output_tokens": 0,
+                    "total_tokens": int(retrieval_tokens),
+                    "note": "embedding used for FAISS retrieval"
+                })
         except Exception:
             examples = []
 
@@ -242,26 +286,70 @@ def chat(data: ChatIn):
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(session_history)  # Inject conversation history
         messages.append({"role": "user", "content": data.message})
-        
-        # Check if using Gemini or OpenAI
+
+        # Model generation - collect token usage per provider
+        reply = ""
         if data.model.startswith("gemini"):
             # Use Gemini API
             gemini_model = genai.GenerativeModel(data.model)
-            
-            # Convert messages to Gemini format
-            gemini_history = []
+
+            # Convert messages to Gemini/plain prompt
             gemini_prompt = system_prompt + "\n\n"
-            
             for msg in session_history:
                 if msg["role"] == "user":
                     gemini_prompt += f"User: {msg['content']}\n"
                 elif msg["role"] == "assistant":
                     gemini_prompt += f"Alex: {msg['content']}\n"
-            
+
             gemini_prompt += f"User: {data.message}\nAlex:"
-            
-            response = gemini_model.generate_content(gemini_prompt)
-            reply = response.text
+
+            # Record estimated prompt tokens before the call (may be overwritten if provider returns real usage)
+            estimated_prompt_tokens = estimate_tokens(gemini_prompt)
+            try:
+                response = gemini_model.generate_content(gemini_prompt)
+            except Exception as e:
+                raise
+
+            # Extract text reply
+            reply_text = None
+            if hasattr(response, "text") and isinstance(response.text, str):
+                reply_text = response.text
+            elif hasattr(response, "candidates") and len(response.candidates) > 0:
+                # Google GenAI sometimes returns candidates
+                c0 = response.candidates[0]
+                reply_text = getattr(c0, "output", None) or getattr(c0, "content", None) or str(c0)
+            else:
+                reply_text = str(response)
+
+            # Try to read token usage from response (best-effort)
+            gemini_input = None
+            gemini_output = None
+            token_note = "estimated"
+            if hasattr(response, "token_usage"):
+                tu = response.token_usage
+                gemini_input = getattr(tu, "input_tokens", None) or getattr(tu, "prompt_tokens", None)
+                gemini_output = getattr(tu, "output_tokens", None) or getattr(tu, "completion_tokens", None)
+                token_note = "reported"
+            elif isinstance(response, dict) and "tokenUsage" in response:
+                tu = response["tokenUsage"]
+                gemini_input = tu.get("inputTokens") or tu.get("promptTokens")
+                gemini_output = tu.get("outputTokens") or tu.get("completionTokens")
+                token_note = "reported"
+
+            if gemini_input is None:
+                gemini_input = estimated_prompt_tokens
+            if gemini_output is None:
+                gemini_output = estimate_tokens(reply_text)
+
+            token_calls.append({
+                "name": "gemini_generate",
+                "input_tokens": int(gemini_input),
+                "output_tokens": int(gemini_output),
+                "total_tokens": int(gemini_input) + int(gemini_output),
+                "note": token_note,
+            })
+
+            reply = reply_text
         else:
             # Use OpenAI API
             response = client.chat.completions.create(
@@ -275,6 +363,51 @@ def chat(data: ChatIn):
                 reply = choice.message.content
             else:
                 reply = choice["message"]["content"]
+
+            # Try to extract usage from the response
+            usage = None
+            if hasattr(response, "usage"):
+                usage = response.usage
+            elif isinstance(response, dict) and "usage" in response:
+                usage = response["usage"]
+
+            if usage is not None:
+                # usage may be attribute-like or dict-like
+                if hasattr(usage, "prompt_tokens") or hasattr(usage, "completion_tokens"):
+                    input_t = getattr(usage, "prompt_tokens", None) or getattr(usage, "prompt_tokens", None)
+                    output_t = getattr(usage, "completion_tokens", None) or getattr(usage, "completion_tokens", None)
+                    total_t = getattr(usage, "total_tokens", None) or getattr(usage, "total_tokens", None)
+                else:
+                    input_t = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+                    output_t = usage.get("completion_tokens") if isinstance(usage, dict) else None
+                    total_t = usage.get("total_tokens") if isinstance(usage, dict) else None
+
+                # fallbacks
+                if input_t is None:
+                    input_t = estimate_tokens(json.dumps(messages))
+                if output_t is None:
+                    output_t = estimate_tokens(reply)
+                if total_t is None:
+                    total_t = int(input_t) + int(output_t)
+
+                token_calls.append({
+                    "name": "openai_chat",
+                    "input_tokens": int(input_t),
+                    "output_tokens": int(output_t),
+                    "total_tokens": int(total_t),
+                    "note": "reported" if (hasattr(usage, "total_tokens") or (isinstance(usage, dict) and "total_tokens" in usage)) else "estimated",
+                })
+            else:
+                # No usage reported: estimate
+                in_est = estimate_tokens(json.dumps(messages))
+                out_est = estimate_tokens(reply)
+                token_calls.append({
+                    "name": "openai_chat",
+                    "input_tokens": int(in_est),
+                    "output_tokens": int(out_est),
+                    "total_tokens": int(in_est) + int(out_est),
+                    "note": "estimated",
+                })
         
         # Update conversation history with user message and assistant reply
         session_history.append({"role": "user", "content": data.message})
@@ -286,6 +419,19 @@ def chat(data: ChatIn):
         
         CONVERSATION_HISTORY[data.session_id] = session_history
 
-        return {"reply": reply}
+        # Aggregate totals
+        total_input = sum(int(c.get("input_tokens", 0)) for c in token_calls)
+        total_output = sum(int(c.get("output_tokens", 0)) for c in token_calls)
+        total_all = sum(int(c.get("total_tokens", 0)) for c in token_calls)
+
+        return {
+            "reply": reply,
+            "tokens": {
+                "calls": token_calls,
+                "input_tokens": int(total_input),
+                "output_tokens": int(total_output),
+                "total_tokens": int(total_all),
+            },
+        }
     except Exception as e:
         return {"error": str(e)}
