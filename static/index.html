@@ -415,6 +415,19 @@
             color: #666;
             margin-left: 8px;
         }
+        #change-user-btn {
+            margin-left: 8px;
+            background: transparent;
+            border: 1px solid rgba(255,255,255,0.15);
+            color: white;
+            padding: 6px 8px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        #change-user-btn:hover {
+            background: rgba(255,255,255,0.06);
+        }
 
         /* Model selector dropdown */
         #model-selector-container {
@@ -472,7 +485,10 @@
                 placeholder="Enter your name..." 
                 autocomplete="name"
             >
-            <button id="user-submit-btn" onclick="submitUserName()">Start Chatting</button>
+            <div style="display:flex;gap:8px;margin-top:8px;">
+                <button id="user-submit-btn" onclick="submitUserName()">Start Chatting</button>
+                <button id="user-cancel-btn" onclick="closeUserModal()">Cancel</button>
+            </div>
         </div>
     </div>
 
@@ -493,8 +509,9 @@
             <header>
                 <button id="toggle-sidebar" aria-label="Toggle sidebar">☰</button>
                 <div id="header-title">
-                    Chat with Alex
+                    Alexi, the Alex inspired chatbot
                     <span id="current-user-display"></span>
+                    <button id="change-user-btn" title="Change user">Change</button>
                 </div>
                 <div id="model-selector-container">
                     <label for="model-selector">Model:</label>
@@ -541,6 +558,8 @@
         const userModal = document.getElementById('user-modal');
         const userNameInput = document.getElementById('user-name-input');
         const currentUserDisplay = document.getElementById('current-user-display');
+        const changeUserBtn = document.getElementById('change-user-btn');
+        const userCancelBtn = document.getElementById('user-cancel-btn');
         const modelSelector = document.getElementById('model-selector');
         const tokenUsageEl = document.getElementById('token-usage');
 
@@ -577,6 +596,30 @@
             });
         };
 
+        // Open/close user modal (for switching users)
+        window.closeUserModal = function() {
+            // Prevent closing modal when no user is set (initial required)
+            if (!currentUser) return;
+            userModal.classList.add('hidden');
+        };
+
+        window.openUserModal = function() {
+            userNameInput.value = currentUser || '';
+            document.querySelectorAll('.quick-select button').forEach(btn => {
+                btn.classList.toggle('selected', btn.textContent === (currentUser || ''));
+            });
+            // Only allow cancel if there's an existing user
+            if (userCancelBtn) userCancelBtn.disabled = !currentUser;
+            userModal.classList.remove('hidden');
+            userNameInput.focus();
+        };
+
+        if (changeUserBtn) {
+            changeUserBtn.addEventListener('click', () => {
+                openUserModal();
+            });
+        }
+
         // Submit user name
         window.submitUserName = function() {
             const name = userNameInput.value.trim();
@@ -588,6 +631,8 @@
             localStorage.setItem('alex_current_user', currentUser);
             userModal.classList.add('hidden');
             currentUserDisplay.textContent = `(${currentUser})`;
+            if (changeUserBtn) changeUserBtn.disabled = false;
+            if (userCancelBtn) userCancelBtn.disabled = false;
             loadChats();
         };
 
@@ -871,6 +916,8 @@
         if (checkUser()) {
             loadChats();
         }
+        if (changeUserBtn) changeUserBtn.disabled = !currentUser;
+        if (userCancelBtn) userCancelBtn.disabled = !currentUser;
     </script>
 </body>
 </html>
