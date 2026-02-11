@@ -71,6 +71,7 @@ RAG_INDEX = None
 RAG_CHUNKS = None
 RAG_ERROR = None
 MEMORIES = None
+LIFE_MEMORIES = None
 DB_CONN = None
 DB_LAST_ERROR = None
 LAST_LIFE_RECALL = None
@@ -82,7 +83,7 @@ CONVERSATION_HISTORY = {}
 
 @app.on_event("startup")
 def _load_rag_assets():
-    global RAG_INDEX, RAG_CHUNKS, RAG_ERROR, MEMORIES, DB_CONN
+    global RAG_INDEX, RAG_CHUNKS, RAG_ERROR, MEMORIES, LIFE_MEMORIES, DB_CONN
     faiss_path = os.getenv("RAG_FAISS_INDEX_PATH", _DEFAULT_FAISS_PATH)
     chunks_path = os.getenv("RAG_CHUNKS_PATH", _DEFAULT_CHUNKS_PATH)
 
@@ -128,9 +129,21 @@ def _load_rag_assets():
                 logging.info(f"Loaded {count} core_memories from database")
             except Exception:
                 logging.info("Loaded core_memories from database (count unknown)")
+            # Load life_memories into LIFE_MEMORIES
+            with DB_CONN.cursor() as cur:
+                cur.execute("SELECT content FROM life_memories ORDER BY id")
+                rows = cur.fetchall()
+                LIFE_MEMORIES = [row[0] for row in rows if row[0]]
+            # Log how many life memories were loaded
+            try:
+                count = len(LIFE_MEMORIES) if isinstance(LIFE_MEMORIES, list) else 0
+                logging.info(f"Loaded {count} life_memories from database")
+            except Exception:
+                logging.info("Loaded life_memories from database (count unknown)")
         else:
             logging.warning("SUPABASE_DB_URL environment variable not set")
             MEMORIES = None
+            LIFE_MEMORIES = None
     except Exception as e:
         # Log the exception for debugging and clear connection/memories
         logging.exception("Failed to connect to Supabase/Postgres or load core_memories")
@@ -138,6 +151,7 @@ def _load_rag_assets():
         DB_LAST_ERROR = f"{type(e).__name__}: {e}"
         DB_CONN = None
         MEMORIES = None
+        LIFE_MEMORIES = None
     finally:
         # Diagnostic log whether DB_CONN appears connected
         if DB_CONN:
@@ -375,6 +389,28 @@ def _reload_memories():
         logging.info(f"Reloaded core_memories: {count} items in MEMORIES")
     except Exception:
         logging.info("Reloaded core_memories (count unknown)")
+
+
+def _reload_life_memories():
+    """Reload life_memories from Supabase database into the global LIFE_MEMORIES variable."""
+    global LIFE_MEMORIES
+    try:
+        if DB_CONN:
+            with DB_CONN.cursor() as cur:
+                cur.execute("SELECT content FROM life_memories ORDER BY id")
+                rows = cur.fetchall()
+                LIFE_MEMORIES = [row[0] for row in rows if row[0]]
+        else:
+            LIFE_MEMORIES = None
+    except Exception:
+        LIFE_MEMORIES = None
+
+    # Log how many life memories are currently loaded
+    try:
+        count = len(LIFE_MEMORIES) if isinstance(LIFE_MEMORIES, list) else 0
+        logging.info(f"Reloaded life_memories: {count} items in LIFE_MEMORIES")
+    except Exception:
+        logging.info("Reloaded life_memories (count unknown)")
 
 
 _RECALL_TRIGGERS = {
@@ -616,12 +652,13 @@ def _summarize_conversation(session_history: list) -> str:
         return ""
 
 
-def _check_duplicate_memory(new_memory: str, threshold: float = 0.85) -> bool:
+def _check_duplicate_memory(new_memory: str, threshold: float = 0.85, check_life_memories: bool = True) -> bool:
     """Check if a memory is a duplicate using cosine similarity.
     
     Args:
         new_memory: The memory text to check
         threshold: Cosine similarity threshold (default 0.85)
+        check_life_memories: If True, check against LIFE_MEMORIES; if False, check against MEMORIES
     
     Returns:
         True if duplicate found (similarity > threshold), False otherwise
@@ -629,7 +666,10 @@ def _check_duplicate_memory(new_memory: str, threshold: float = 0.85) -> bool:
     if not new_memory or not new_memory.strip():
         return True  # Empty memory is considered duplicate
     
-    if not MEMORIES or not isinstance(MEMORIES, list) or len(MEMORIES) == 0:
+    # Select which memory cache to check
+    memory_cache = LIFE_MEMORIES if check_life_memories else MEMORIES
+    
+    if not memory_cache or not isinstance(memory_cache, list) or len(memory_cache) == 0:
         return False  # No existing memories, so not a duplicate
     
     try:
@@ -637,7 +677,7 @@ def _check_duplicate_memory(new_memory: str, threshold: float = 0.85) -> bool:
         new_embedding, _ = _embed_text(new_memory)
         
         # Compare against all existing memories
-        for existing_memory in MEMORIES:
+        for existing_memory in memory_cache:
             if not existing_memory or not isinstance(existing_memory, str):
                 continue
             
@@ -689,6 +729,33 @@ def _save_memory(memory_line: str):
             _reload_memories()
     except Exception:
         pass
+
+
+def _save_life_memory(memory_line: str):
+    """Append a memory line to Supabase life_memories table and reload LIFE_MEMORIES.
+    
+    Args:
+        memory_line: A single memory string or multiple lines separated by newlines
+    """
+    if not memory_line or not memory_line.strip():
+        return
+    
+    try:
+        if DB_CONN:
+            # Split multi-line memory into individual lines
+            new_memories = [line.strip() for line in memory_line.split("\n") if line.strip()]
+            
+            # Insert each memory into the database
+            with DB_CONN.cursor() as cur:
+                for mem in new_memories:
+                    cur.execute("INSERT INTO life_memories (content) VALUES (%s)", (mem,))
+            DB_CONN.commit()
+            logging.info(f"Saved {len(new_memories)} life_memories to database")
+            
+            # Reload global LIFE_MEMORIES
+            _reload_life_memories()
+    except Exception as e:
+        logging.error(f"Failed to save life_memory: {type(e).__name__}: {e}")
 
 
 def _trim_chunk_for_prompt(chunk: str, max_lines: int = 4) -> str:
@@ -1116,7 +1183,7 @@ def new_chat(data: NewChatIn):
     """End the current chat session and start a new one.
     
     Summarizes the previous conversation, checks for duplicates using embedding similarity,
-    and saves to Supabase core_memories if not a duplicate.
+    and saves to Supabase life_memories if not a duplicate.
     """
     try:
         # Get the conversation history for this session
@@ -1124,27 +1191,35 @@ def new_chat(data: NewChatIn):
         
         summary_saved = False
         duplicate_detected = False
+        extracted_memory = None
         
         # If there's conversation history, summarize and save it
         if session_history:
             # Extract ONE durable factual memory
             summary = _summarize_conversation(session_history)
+            extracted_memory = summary
+            
+            # Log extracted memory for debugging
+            if summary:
+                logging.info(f"Extracted memory: {summary}")
+            else:
+                logging.info("No durable memory extracted from conversation")
             
             if summary:
-                # Check for duplicates using cosine similarity (threshold 0.85)
-                is_duplicate = _check_duplicate_memory(summary, threshold=0.85)
+                # Check for duplicates using cosine similarity (threshold 0.85) against life_memories
+                is_duplicate = _check_duplicate_memory(summary, threshold=0.85, check_life_memories=True)
                 
                 if is_duplicate:
                     duplicate_detected = True
                     logging.info(f"Memory not saved (duplicate): {summary}")
                 else:
-                    # Not a duplicate, save to database
-                    _save_memory(summary)
+                    # Not a duplicate, save to life_memories database
+                    _save_life_memory(summary)
                     summary_saved = True
-                    logging.info(f"New memory saved: {summary}")
+                    logging.info(f"New life_memory saved: {summary}")
                     
-                    # Reload core_memories into cache
-                    _reload_memories()
+                    # Reload life_memories into cache
+                    _reload_life_memories()
         
         # Clear the conversation history for this session
         if data.session_id in CONVERSATION_HISTORY:
@@ -1154,7 +1229,8 @@ def new_chat(data: NewChatIn):
             "status": "ok",
             "message": "New chat started",
             "summary_saved": summary_saved,
-            "duplicate_detected": duplicate_detected
+            "duplicate_detected": duplicate_detected,
+            "extracted_memory": extracted_memory
         }
     except Exception as e:
         logging.error(f"Error in new_chat: {type(e).__name__}: {e}")
