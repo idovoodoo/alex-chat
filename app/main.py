@@ -147,11 +147,59 @@ def _load_rag_assets():
             logging.info("Database not connected")
 
 
+def _ensure_db_connection():
+    """Ensure database connection is alive, reconnect if needed."""
+    global DB_CONN, DB_LAST_ERROR
+    
+    # If no connection exists, try to establish one
+    if DB_CONN is None:
+        try:
+            db_url = os.getenv("SUPABASE_DB_URL")
+            if not db_url:
+                return False
+            
+            # Add sslmode if not present
+            try:
+                p = urlparse(db_url)
+                q = parse_qs(p.query)
+                if "sslmode" not in q:
+                    q["sslmode"] = ["require"]
+                    db_url = urlunparse(p._replace(query=urlencode(q, doseq=True)))
+            except Exception:
+                pass
+            
+            DB_CONN = psycopg2.connect(db_url, connect_timeout=10)
+            DB_LAST_ERROR = None
+            logging.info("Database connection re-established")
+            return True
+        except Exception as e:
+            DB_LAST_ERROR = f"{type(e).__name__}: {e}"
+            logging.error(f"Failed to establish database connection: {DB_LAST_ERROR}")
+            return False
+    
+    # Connection exists, check if it's alive
+    try:
+        with DB_CONN.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+        return True
+    except Exception:
+        # Connection is dead, close it and try to reconnect
+        try:
+            DB_CONN.close()
+        except Exception:
+            pass
+        DB_CONN = None
+        
+        # Try to reconnect
+        return _ensure_db_connection()
+
+
 @app.get("/db_status")
 def _db_status():
     """Return whether the application can reach the configured Supabase/Postgres DB."""
     try:
-        if DB_CONN is None:
+        if not _ensure_db_connection():
             return {"connected": False, "cached_core_memories_count": 0, "error": DB_LAST_ERROR}
         with DB_CONN.cursor() as cur:
             cur.execute("SELECT 1")
@@ -231,7 +279,7 @@ def _debug_db():
         diagnostics["dns_lookup"] = None
 
     # Try a test query
-    if DB_CONN:
+    if _ensure_db_connection():
         try:
             with DB_CONN.cursor() as cur:
                 cur.execute("SELECT 1")
@@ -243,7 +291,7 @@ def _debug_db():
         diagnostics["test_query"] = "no connection"
     
     # Try to count memories in DB (unified table)
-    if DB_CONN:
+    if _ensure_db_connection():
         try:
             with DB_CONN.cursor() as cur:
                 # Count core memories
@@ -366,7 +414,7 @@ def _reload_memories():
     """Reload memories from Supabase database into the global MEMORIES variable."""
     global MEMORIES
     try:
-        if DB_CONN:
+        if _ensure_db_connection():
             with DB_CONN.cursor() as cur:
                 cur.execute("SELECT content FROM memories WHERE type = 'core' ORDER BY id")
                 rows = cur.fetchall()
@@ -448,9 +496,9 @@ def _search_life_memories(message: str, limit: int = 3) -> list[str]:
     if LIFE_RECALL_DEBUG is None:
         LIFE_RECALL_DEBUG = {}
     
-    if DB_CONN is None:
-        LIFE_RECALL_DEBUG["error"] = "DB_CONN is None"
-        logging.warning("Life memory search skipped: DB_CONN is None")
+    if not _ensure_db_connection():
+        LIFE_RECALL_DEBUG["error"] = "DB connection unavailable"
+        logging.warning("Life memory search skipped: DB connection unavailable")
         return []
     if not isinstance(message, str) or not message.strip():
         LIFE_RECALL_DEBUG["error"] = "empty message"
@@ -641,7 +689,7 @@ def _check_duplicate_memory(new_memory: str, threshold: float = 0.85, check_life
     if check_life_memories:
         # Query life memories from database
         try:
-            if DB_CONN:
+            if _ensure_db_connection():
                 with DB_CONN.cursor() as cur:
                     cur.execute("SELECT content FROM memories WHERE type = 'life' ORDER BY id")
                     rows = cur.fetchall()
@@ -699,7 +747,7 @@ def _save_memory(memory_line: str):
         return
     
     try:
-        if DB_CONN:
+        if _ensure_db_connection():
             # Split multi-line memory into individual lines
             new_memories = [line.strip() for line in memory_line.split("\n") if line.strip()]
             
@@ -725,7 +773,7 @@ def _save_life_memory(memory_line: str):
         return
     
     try:
-        if DB_CONN:
+        if _ensure_db_connection():
             # Split multi-line memory into individual lines
             new_memories = [line.strip() for line in memory_line.split("\n") if line.strip()]
             
