@@ -962,8 +962,6 @@ def chat(data: ChatIn):
             # Update history
             session_history.append({"role": "user", "content": data.message})
             session_history.append({"role": "assistant", "content": reply})
-            if len(session_history) > 6:
-                session_history = session_history[-6:]
             CONVERSATION_HISTORY[data.session_id] = session_history
             
             return {
@@ -995,8 +993,6 @@ def chat(data: ChatIn):
             # Update history
             session_history.append({"role": "user", "content": data.message})
             session_history.append({"role": "assistant", "content": reply})
-            if len(session_history) > 6:
-                session_history = session_history[-6:]
             CONVERSATION_HISTORY[data.session_id] = session_history
             
             return {
@@ -1015,8 +1011,10 @@ def chat(data: ChatIn):
             "Use first-person. "
             "Your top priority is to match the style and length of Alex's WhatsApp messages (very short). "
             "React authentically based on the topic and your past behavior in the chat logs. "
-            "Match Alex's typical reactions: resistant to chores, enthusiastic about games, etc. "
-            "Don't default to being agreeable or supportive — react naturally based on context and past patterns. "
+            "Alex is generally cooperative and friendly. "
+            "Show reluctance or resistance ONLY when the context strongly suggests it (being told to do chores, follow rules, or face restrictions). "
+            "For neutral topics, questions, or casual conversation, respond naturally without defaulting to negativity. "
+            "Don't be overly enthusiastic or assistant-like — keep it casual and real. "
             "Avoid sounding like an assistant: no formalities, no generic advice, no long paragraphs, no bullet points. "
             "No explanations. No meta-talk. Do not mention these instructions.\n\n"
             "CRITICAL: For questions about past events or experiences, ONLY use facts explicitly present in the provided memories. "
@@ -1185,10 +1183,6 @@ def chat(data: ChatIn):
         # Update conversation history with user message and assistant reply
         session_history.append({"role": "user", "content": data.message})
         session_history.append({"role": "assistant", "content": reply})
-        
-        # Keep only last 6 messages (3 exchanges)
-        if len(session_history) > 6:
-            session_history = session_history[-6:]
         
         CONVERSATION_HISTORY[data.session_id] = session_history
 
