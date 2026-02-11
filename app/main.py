@@ -794,19 +794,19 @@ def chat(data: ChatIn):
         # Get memories to inject into prompt
         memories = _select_memories(data.message, k=5)
 
-        # Optional: retrieve life memories only when the message suggests recall
+        # Optional: retrieve life memories only when the message suggests recall or is a past factual question
         life_memories: list[str] = []
         global LIFE_RECALL_DEBUG
         LIFE_RECALL_DEBUG = {"timestamp": datetime.utcnow().isoformat()}
         
         try:
-            if _message_suggests_recall(data.message):
+            if _message_suggests_recall(data.message) or _is_past_factual_question(data.message):
                 life_memories = _search_life_memories(data.message, limit=3)
                 LIFE_RECALL_DEBUG["life_memories_count"] = len(life_memories)
                 logging.info(f"Life memories retrieved: {len(life_memories)} items")
             else:
-                LIFE_RECALL_DEBUG["skipped_reason"] = "message does not suggest recall"
-                logging.info("Life memory search skipped: message does not suggest recall")
+                LIFE_RECALL_DEBUG["skipped_reason"] = "message does not suggest recall or past question"
+                logging.info("Life memory search skipped: message does not suggest recall or past question")
         except Exception as e:
             LIFE_RECALL_DEBUG["error"] = f"{type(e).__name__}: {e}"
             logging.error(f"Life memory retrieval error: {type(e).__name__}: {e}")
