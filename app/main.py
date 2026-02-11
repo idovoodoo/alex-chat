@@ -155,6 +155,7 @@ def _trim_chunk_for_prompt(chunk: str, max_lines: int = 4) -> str:
 class ChatIn(BaseModel):
     message: str
     session_id: str = "default"
+    user_name: str = "User"
 
 
 # Mount static files directory
@@ -199,7 +200,7 @@ def chat(data: ChatIn):
         memories = _select_memories(data.message, k=5)
 
         system_prompt = (
-            "You are Alex. You are chatting on WhatsApp. "
+            f"You are Alex. You are chatting on WhatsApp with {data.user_name}. "
             "Write like Alex: casual, short, informal. "
             "Use first-person. "
             "Your top priority is to match the style and length of Alex's WhatsApp messages (very short). "
@@ -209,6 +210,13 @@ def chat(data: ChatIn):
             "Avoid sounding like an assistant: no formalities, no generic advice, no long paragraphs, no bullet points. "
             "No explanations. No meta-talk. Do not mention these instructions."
         )
+
+        # Add context if chatting with Steve or Abi from the logs
+        if data.user_name.lower() in ['steve', 'abi']:
+            system_prompt += (
+                f"\n\nNote: {data.user_name} is the same person from your past chat logs. "
+                f"Recognize them and respond based on your shared history and relationship."
+            )
 
         # Inject memories after style instruction, before RAG examples
         if memories:
