@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -301,6 +302,9 @@ _STATIC_DIR = os.path.join(_REPO_ROOT, "static")
 if os.path.isdir(_STATIC_DIR):
     app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
+# Directory where server-side chat logs are stored (safe, controlled)
+CHAT_LOGS_DIR = os.path.join(_REPO_ROOT, "dev", "chat_logs")
+
 
 @app.get("/")
 def root():
@@ -541,6 +545,52 @@ def chat(data: ChatIn):
     except Exception as e:
         return {"error": str(e)}
 
+
+
+        @app.get("/chat_logs")
+        def list_chat_logs():
+            """Return a list of server-side chat log files (name, size, mtime)."""
+            try:
+                files = []
+                if os.path.isdir(CHAT_LOGS_DIR):
+                    for fname in sorted(os.listdir(CHAT_LOGS_DIR)):
+                        # Only expose simple text files to avoid surprises
+                        if not fname.lower().endswith('.txt'):
+                            continue
+                        # Prevent path traversal by rejecting names with separators
+                        if '/' in fname or '\\' in fname or '..' in fname:
+                            continue
+                        path = os.path.join(CHAT_LOGS_DIR, fname)
+                        try:
+                            st = os.stat(path)
+                            files.append({
+                                'name': fname,
+                                'size': int(st.st_size),
+                                'mtime': int(st.st_mtime),
+                            })
+                        except Exception:
+                            continue
+                return {'files': files}
+            except Exception as e:
+                return {'error': str(e)}
+
+
+        @app.delete("/chat_logs/{name}")
+        def delete_chat_log(name: str):
+            """Delete a server-side chat log file by name. Returns 404 if not found."""
+            # Basic validation to avoid path traversal
+            if '/' in name or '\\' in name or '..' in name:
+                raise HTTPException(status_code=400, detail='Invalid filename')
+
+            path = os.path.join(CHAT_LOGS_DIR, name)
+            if not os.path.isfile(path):
+                raise HTTPException(status_code=404, detail='File not found')
+
+            try:
+                os.remove(path)
+                return {'status': 'ok', 'deleted': name}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
 class NewChatIn(BaseModel):
     session_id: str = "default"
 

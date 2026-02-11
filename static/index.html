@@ -502,6 +502,15 @@
             <div id="chat-list">
                 <!-- Chat items will appear here -->
             </div>
+            <div id="server-logs-container" style="border-top:1px solid #eee;">
+                <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;">
+                    <strong>Server Logs</strong>
+                    <div>
+                        <button id="refresh-server-logs" style="background:#f0f0f0;border:1px solid #ddd;padding:6px 8px;border-radius:6px;cursor:pointer">Refresh</button>
+                    </div>
+                </div>
+                <div id="server-logs" style="max-height:200px;overflow:auto;padding:8px 12px;font-size:13px;color:#333"></div>
+            </div>
         </div>
 
         <!-- Main chat area -->
@@ -726,32 +735,124 @@
         // Render the chat list in sidebar
         function renderChatList() {
             chatList.innerHTML = '';
-            
+
             const chatIds = Object.keys(chats).sort((a, b) => chats[b].lastUpdated - chats[a].lastUpdated);
-            
+
             chatIds.forEach(chatId => {
                 const chat = chats[chatId];
                 const chatItem = document.createElement('div');
                 chatItem.className = 'chat-item' + (chatId === currentChatId ? ' active' : '');
                 chatItem.onclick = () => loadChat(chatId);
-                
+
                 const title = document.createElement('div');
                 title.className = 'chat-item-title';
                 title.textContent = chat.title;
-                
+
                 const preview = document.createElement('div');
                 preview.className = 'chat-item-preview';
                 preview.textContent = chat.preview || 'No messages yet';
-                
+
                 const time = document.createElement('div');
                 time.className = 'chat-item-time';
                 time.textContent = formatTime(chat.lastUpdated);
-                
-                chatItem.appendChild(title);
-                chatItem.appendChild(preview);
+
+                const rightWrap = document.createElement('div');
+                rightWrap.style.display = 'flex';
+                rightWrap.style.alignItems = 'center';
+                rightWrap.style.gap = '8px';
+
+                const delBtn = document.createElement('button');
+                delBtn.textContent = 'Delete';
+                delBtn.title = 'Delete this chat';
+                delBtn.style.background = '#fff';
+                delBtn.style.border = '1px solid #eee';
+                delBtn.style.padding = '6px 8px';
+                delBtn.style.borderRadius = '6px';
+                delBtn.style.cursor = 'pointer';
+                delBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    if (!confirm('Delete this chat?')) return;
+                    delete chats[chatId];
+                    // If we deleted the open chat, open the next most recent or create a new one
+                    if (currentChatId === chatId) {
+                        const ids = Object.keys(chats).sort((a, b) => chats[b].lastUpdated - chats[a].lastUpdated);
+                        if (ids.length > 0) {
+                            loadChat(ids[0]);
+                        } else {
+                            createNewChat();
+                        }
+                    }
+                    saveChats();
+                    renderChatList();
+                };
+
+                rightWrap.appendChild(delBtn);
+
+                const leftWrap = document.createElement('div');
+                leftWrap.style.flex = '1';
+                leftWrap.appendChild(title);
+                leftWrap.appendChild(preview);
+
+                chatItem.appendChild(leftWrap);
+                chatItem.appendChild(rightWrap);
                 chatItem.appendChild(time);
                 chatList.appendChild(chatItem);
             });
+        }
+
+
+        // Fetch server-side chat logs and render list with delete buttons
+        async function fetchServerLogs() {
+            const container = document.getElementById('server-logs');
+            container.innerHTML = 'Loading...';
+            try {
+                const res = await fetch('/chat_logs');
+                const data = await res.json();
+                container.innerHTML = '';
+                if (!data || !Array.isArray(data.files)) {
+                    container.textContent = 'No logs found';
+                    return;
+                }
+                data.files.forEach(f => {
+                    const row = document.createElement('div');
+                    row.style.display = 'flex';
+                    row.style.justifyContent = 'space-between';
+                    row.style.alignItems = 'center';
+                    row.style.padding = '6px 0';
+
+                    const info = document.createElement('div');
+                    info.textContent = `${f.name} (${f.size} bytes)`;
+
+                    const btn = document.createElement('button');
+                    btn.textContent = 'Delete';
+                    btn.style.background = '#fff';
+                    btn.style.border = '1px solid #eee';
+                    btn.style.padding = '6px 8px';
+                    btn.style.borderRadius = '6px';
+                    btn.style.cursor = 'pointer';
+                    btn.onclick = async () => {
+                        if (!confirm('Delete server log ' + f.name + '?')) return;
+                        try {
+                            const r = await fetch('/chat_logs/' + encodeURIComponent(f.name), { method: 'DELETE' });
+                            const jr = await r.json();
+                            if (r.ok) {
+                                fetchServerLogs();
+                            } else {
+                                alert('Failed: ' + (jr.detail || jr.error || JSON.stringify(jr)));
+                            }
+                        } catch (err) {
+                            alert('Error deleting file: ' + err.message);
+                        }
+                    };
+
+                    row.appendChild(info);
+                    row.appendChild(btn);
+                    container.appendChild(row);
+                });
+                if (data.files.length === 0) container.textContent = 'No logs found';
+            } catch (err) {
+                container.textContent = 'Error loading logs';
+            }
         }
 
         // Format timestamp
@@ -918,6 +1019,10 @@
         }
         if (changeUserBtn) changeUserBtn.disabled = !currentUser;
         if (userCancelBtn) userCancelBtn.disabled = !currentUser;
+        const refreshServerLogsBtn = document.getElementById('refresh-server-logs');
+        if (refreshServerLogsBtn) refreshServerLogsBtn.addEventListener('click', fetchServerLogs);
+        // Load server logs once on startup
+        fetchServerLogs();
     </script>
 </body>
 </html>
