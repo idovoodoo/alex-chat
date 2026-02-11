@@ -8,10 +8,15 @@ from openai import OpenAI
 import google.generativeai as genai
 import os
 import json
+import psycopg2
+from dotenv import load_dotenv
 
 import faiss
 import numpy as np
 import math
+
+# Load environment variables from .env file
+load_dotenv()
 
 
 app = FastAPI()
@@ -36,12 +41,12 @@ genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 _DEFAULT_FAISS_PATH = os.path.join(_REPO_ROOT, "dev", "chat_chunks", "outputs", "index.faiss")
 _DEFAULT_CHUNKS_PATH = os.path.join(_REPO_ROOT, "dev", "chat_chunks", "outputs", "chunks.json")
-_DEFAULT_MEMORY_PATH = os.path.join(_REPO_ROOT, "dev", "chat_chunks", "outputs", "memories.json")
 
 RAG_INDEX = None
 RAG_CHUNKS = None
 RAG_ERROR = None
 MEMORIES = None
+DB_CONN = None
 
 # In-memory conversation history per session
 CONVERSATION_HISTORY = {}
@@ -49,10 +54,9 @@ CONVERSATION_HISTORY = {}
 
 @app.on_event("startup")
 def _load_rag_assets():
-    global RAG_INDEX, RAG_CHUNKS, RAG_ERROR, MEMORIES
+    global RAG_INDEX, RAG_CHUNKS, RAG_ERROR, MEMORIES, DB_CONN
     faiss_path = os.getenv("RAG_FAISS_INDEX_PATH", _DEFAULT_FAISS_PATH)
     chunks_path = os.getenv("RAG_CHUNKS_PATH", _DEFAULT_CHUNKS_PATH)
-    memory_path = os.getenv("MEMORY_PATH", _DEFAULT_MEMORY_PATH)
 
     try:
         RAG_INDEX = faiss.read_index(faiss_path)
@@ -66,13 +70,35 @@ def _load_rag_assets():
         RAG_CHUNKS = None
         RAG_ERROR = str(e)
 
+    # Connect to Supabase PostgreSQL and load core_memories
     try:
-        with open(memory_path, "r", encoding="utf-8") as f:
-            MEMORIES = json.load(f)
-        if not isinstance(MEMORIES, list):
+        db_url = os.getenv("SUPABASE_DB_URL")
+        if db_url:
+            DB_CONN = psycopg2.connect(db_url)
+            # Load core_memories into MEMORIES
+            with DB_CONN.cursor() as cur:
+                cur.execute("SELECT content FROM core_memories ORDER BY id")
+                rows = cur.fetchall()
+                MEMORIES = [row[0] for row in rows if row[0]]
+        else:
             MEMORIES = None
     except Exception:
+        DB_CONN = None
         MEMORIES = None
+
+
+@app.get("/db_status")
+def _db_status():
+    """Return whether the application can reach the configured Supabase/Postgres DB."""
+    try:
+        if DB_CONN is None:
+            return {"connected": False}
+        with DB_CONN.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+        return {"connected": True}
+    except Exception:
+        return {"connected": False}
 
 
 def estimate_tokens(text: str) -> int:
@@ -150,13 +176,15 @@ def _select_memories(query: str, k: int = 5) -> list[str]:
 
 
 def _reload_memories():
-    """Reload memories from the JSON file into the global MEMORIES variable."""
+    """Reload memories from Supabase database into the global MEMORIES variable."""
     global MEMORIES
-    memory_path = os.getenv("MEMORY_PATH", _DEFAULT_MEMORY_PATH)
     try:
-        with open(memory_path, "r", encoding="utf-8") as f:
-            MEMORIES = json.load(f)
-        if not isinstance(MEMORIES, list):
+        if DB_CONN:
+            with DB_CONN.cursor() as cur:
+                cur.execute("SELECT content FROM core_memories ORDER BY id")
+                rows = cur.fetchall()
+                MEMORIES = [row[0] for row in rows if row[0]]
+        else:
             MEMORIES = None
     except Exception:
         MEMORIES = None
@@ -214,7 +242,7 @@ def _summarize_conversation(session_history: list) -> str:
 
 
 def _save_memory(memory_line: str):
-    """Append a memory line to memories.json and reload MEMORIES.
+    """Append a memory line to Supabase core_memories table and reload MEMORIES.
     
     Args:
         memory_line: A single memory string or multiple lines separated by newlines
@@ -222,29 +250,19 @@ def _save_memory(memory_line: str):
     if not memory_line or not memory_line.strip():
         return
     
-    memory_path = os.getenv("MEMORY_PATH", _DEFAULT_MEMORY_PATH)
-    
     try:
-        # Load existing memories
-        existing_memories = []
-        if os.path.exists(memory_path):
-            with open(memory_path, "r", encoding="utf-8") as f:
-                existing_memories = json.load(f)
-                if not isinstance(existing_memories, list):
-                    existing_memories = []
-        
-        # Split multi-line memory into individual lines
-        new_memories = [line.strip() for line in memory_line.split("\n") if line.strip()]
-        
-        # Append new memories
-        existing_memories.extend(new_memories)
-        
-        # Save back to file
-        with open(memory_path, "w", encoding="utf-8") as f:
-            json.dump(existing_memories, f, indent=2, ensure_ascii=False)
-        
-        # Reload global MEMORIES
-        _reload_memories()
+        if DB_CONN:
+            # Split multi-line memory into individual lines
+            new_memories = [line.strip() for line in memory_line.split("\n") if line.strip()]
+            
+            # Insert each memory into the database
+            with DB_CONN.cursor() as cur:
+                for mem in new_memories:
+                    cur.execute("INSERT INTO core_memories (content) VALUES (%s)", (mem,))
+            DB_CONN.commit()
+            
+            # Reload global MEMORIES
+            _reload_memories()
     except Exception:
         pass
 
@@ -599,7 +617,7 @@ class NewChatIn(BaseModel):
 def new_chat(data: NewChatIn):
     """End the current chat session and start a new one.
     
-    Summarizes the previous conversation and saves it to memories.json.
+    Summarizes the previous conversation and saves it to Supabase core_memories.
     """
     try:
         # Get the conversation history for this session

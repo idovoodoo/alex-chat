@@ -5,3 +5,4 @@ google-generativeai
 faiss-cpu
 numpy
 python-dotenv
+psycopg2-binary

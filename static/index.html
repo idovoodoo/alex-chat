@@ -530,7 +530,10 @@
                         <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash Lite</option>
                     </select>
                 </div>
-                <div id="token-usage">In: - | Out: -</div>
+                <div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px;">
+                    <div id="token-usage">In: - | Out: -</div>
+                    <div id="db-status" style="font-size:12px;color:#fff;opacity:0.85">DB: Unknown</div>
+                </div>
             </header>
             
             <div id="chat-container">
@@ -571,7 +574,8 @@
         const userCancelBtn = document.getElementById('user-cancel-btn');
         const modelSelector = document.getElementById('model-selector');
         const tokenUsageEl = document.getElementById('token-usage');
-
+        const dbStatusEl = document.getElementById('db-status');
+        
         // User management
         let currentUser = null;
 
@@ -593,6 +597,28 @@
 
         // Load saved model on page load
         loadSelectedModel();
+
+        // Check database status helper
+        async function checkDbStatus() {
+            if (!dbStatusEl) return;
+            try {
+                const resp = await fetch('/db_status');
+                const j = await resp.json();
+                if (j && j.connected) {
+                    dbStatusEl.textContent = 'DB: Connected';
+                    dbStatusEl.style.color = '#b2f5ea';
+                    dbStatusEl.style.opacity = '0.95';
+                } else {
+                    dbStatusEl.textContent = 'DB: Disconnected';
+                    dbStatusEl.style.color = '#ffb3b3';
+                    dbStatusEl.style.opacity = '0.95';
+                }
+            } catch (e) {
+                dbStatusEl.textContent = 'DB: Unreachable';
+                dbStatusEl.style.color = '#ffb3b3';
+                dbStatusEl.style.opacity = '0.95';
+            }
+        }
 
         // Save model when changed
         modelSelector.addEventListener('change', saveSelectedModel);
@@ -995,6 +1021,8 @@
                 messageInput.disabled = false;
                 sendBtn.disabled = false;
                 messageInput.focus();
+                // refresh DB status after each request
+                if (typeof checkDbStatus === 'function') checkDbStatus();
             }
         }
 
@@ -1023,6 +1051,8 @@
         if (refreshServerLogsBtn) refreshServerLogsBtn.addEventListener('click', fetchServerLogs);
         // Load server logs once on startup
         fetchServerLogs();
+        // Check DB status once on startup
+        if (typeof checkDbStatus === 'function') checkDbStatus();
     </script>
 </body>
 </html>
