@@ -127,6 +127,43 @@ def _db_status():
         return {"connected": False, "core_memories_count": 0}
 
 
+@app.get("/debug/db")
+def _debug_db():
+    """Detailed database diagnostics for debugging."""
+    diagnostics = {
+        "env_var_set": bool(os.getenv("SUPABASE_DB_URL")),
+        "db_conn_object": DB_CONN is not None,
+        "memories_loaded": isinstance(MEMORIES, list),
+        "memories_count": len(MEMORIES) if isinstance(MEMORIES, list) else 0,
+    }
+    
+    # Try a test query
+    if DB_CONN:
+        try:
+            with DB_CONN.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+            diagnostics["test_query"] = "success"
+        except Exception as e:
+            diagnostics["test_query"] = f"failed: {str(e)}"
+    else:
+        diagnostics["test_query"] = "no connection"
+    
+    # Try to count core_memories in DB
+    if DB_CONN:
+        try:
+            with DB_CONN.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM core_memories")
+                count = cur.fetchone()[0]
+            diagnostics["db_row_count"] = int(count)
+        except Exception as e:
+            diagnostics["db_row_count"] = f"error: {str(e)}"
+    else:
+        diagnostics["db_row_count"] = "no connection"
+    
+    return diagnostics
+
+
 def estimate_tokens(text: str) -> int:
     """Rudimentary token estimator when exact usage isn't available.
 

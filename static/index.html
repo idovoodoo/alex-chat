@@ -502,14 +502,14 @@
             <div id="chat-list">
                 <!-- Chat items will appear here -->
             </div>
-            <div id="server-logs-container" style="border-top:1px solid #eee;">
-                <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;">
-                    <strong>Server Logs</strong>
+            <div id="debug-panel" style="border-top:1px solid #eee;background:#fff;padding:8px 8px;font-size:13px;color:#333;">
+                <div style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;">
+                    <strong>Debug</strong>
                     <div>
-                        <button id="refresh-server-logs" style="background:#f0f0f0;border:1px solid #ddd;padding:6px 8px;border-radius:6px;cursor:pointer">Refresh</button>
+                        <button id="refresh-debug" style="background:#f0f0f0;border:1px solid #ddd;padding:6px 8px;border-radius:6px;cursor:pointer">Refresh</button>
                     </div>
                 </div>
-                <div id="server-logs" style="max-height:200px;overflow:auto;padding:8px 12px;font-size:13px;color:#333"></div>
+                <div id="debug-output" style="max-height:200px;overflow:auto;padding:8px 12px;font-size:13px;color:#333;white-space:pre-wrap"></div>
             </div>
         </div>
 
@@ -827,57 +827,24 @@
         }
 
 
-        // Fetch server-side chat logs and render list with delete buttons
-        async function fetchServerLogs() {
-            const container = document.getElementById('server-logs');
-            container.innerHTML = 'Loading...';
+        // Fetch debug diagnostics and render into the debug panel
+        async function fetchDebugInfo() {
+            const container = document.getElementById('debug-output');
+            if (!container) return;
+            container.textContent = 'Loading debug info...';
             try {
-                const res = await fetch('/chat_logs');
+                const res = await fetch('/debug/db');
                 const data = await res.json();
                 container.innerHTML = '';
-                if (!data || !Array.isArray(data.files)) {
-                    container.textContent = 'No logs found';
-                    return;
-                }
-                data.files.forEach(f => {
+                // Pretty print key / value pairs
+                for (const [k, v] of Object.entries(data)) {
                     const row = document.createElement('div');
-                    row.style.display = 'flex';
-                    row.style.justifyContent = 'space-between';
-                    row.style.alignItems = 'center';
-                    row.style.padding = '6px 0';
-
-                    const info = document.createElement('div');
-                    info.textContent = `${f.name} (${f.size} bytes)`;
-
-                    const btn = document.createElement('button');
-                    btn.textContent = 'Delete';
-                    btn.style.background = '#fff';
-                    btn.style.border = '1px solid #eee';
-                    btn.style.padding = '6px 8px';
-                    btn.style.borderRadius = '6px';
-                    btn.style.cursor = 'pointer';
-                    btn.onclick = async () => {
-                        if (!confirm('Delete server log ' + f.name + '?')) return;
-                        try {
-                            const r = await fetch('/chat_logs/' + encodeURIComponent(f.name), { method: 'DELETE' });
-                            const jr = await r.json();
-                            if (r.ok) {
-                                fetchServerLogs();
-                            } else {
-                                alert('Failed: ' + (jr.detail || jr.error || JSON.stringify(jr)));
-                            }
-                        } catch (err) {
-                            alert('Error deleting file: ' + err.message);
-                        }
-                    };
-
-                    row.appendChild(info);
-                    row.appendChild(btn);
+                    row.style.padding = '4px 0';
+                    row.textContent = `${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`;
                     container.appendChild(row);
-                });
-                if (data.files.length === 0) container.textContent = 'No logs found';
+                }
             } catch (err) {
-                container.textContent = 'Error loading logs';
+                container.textContent = 'Error loading debug info: ' + (err.message || err);
             }
         }
 
@@ -1047,10 +1014,10 @@
         }
         if (changeUserBtn) changeUserBtn.disabled = !currentUser;
         if (userCancelBtn) userCancelBtn.disabled = !currentUser;
-        const refreshServerLogsBtn = document.getElementById('refresh-server-logs');
-        if (refreshServerLogsBtn) refreshServerLogsBtn.addEventListener('click', fetchServerLogs);
-        // Load server logs once on startup
-        fetchServerLogs();
+        const refreshDebugBtn = document.getElementById('refresh-debug');
+        if (refreshDebugBtn) refreshDebugBtn.addEventListener('click', fetchDebugInfo);
+        // Load debug info once on startup
+        fetchDebugInfo();
         // Check DB status once on startup
         if (typeof checkDbStatus === 'function') checkDbStatus();
     </script>
