@@ -753,10 +753,10 @@ def _summarize_conversation(session_history: list) -> str:
         
         # GPT-5 models can spend a lot of tokens on reasoning; keep enough headroom
         # so we reliably get an actual output sentence.
+        # Note: GPT-5-mini only supports default temperature (1)
         summary, usage = _openai_chat_completion(
             model="gpt-5-mini",
             messages=[{"role": "user", "content": summary_prompt}],
-            temperature=0.2,
             max_tokens=256,
         )
         
@@ -789,7 +789,6 @@ def _summarize_conversation(session_history: list) -> str:
             summary, usage = _openai_chat_completion(
                 model="gpt-5-mini",
                 messages=[{"role": "user", "content": summary_prompt}],
-                temperature=0.2,
                 max_tokens=512,
             )
             
