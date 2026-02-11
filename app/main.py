@@ -68,6 +68,7 @@ RAG_CHUNKS = None
 RAG_ERROR = None
 MEMORIES = None
 DB_CONN = None
+DB_LAST_ERROR = None
 
 # In-memory conversation history per session
 CONVERSATION_HISTORY = {}
@@ -112,15 +113,18 @@ def _load_rag_assets():
         else:
             logging.warning("SUPABASE_DB_URL environment variable not set")
             MEMORIES = None
-    except Exception:
+    except Exception as e:
         # Log the exception for debugging and clear connection/memories
         logging.exception("Failed to connect to Supabase/Postgres or load core_memories")
+        global DB_LAST_ERROR
+        DB_LAST_ERROR = f"{type(e).__name__}: {e}"
         DB_CONN = None
         MEMORIES = None
     finally:
         # Diagnostic log whether DB_CONN appears connected
         if DB_CONN:
             logging.info("Database connection established")
+            DB_LAST_ERROR = None
         else:
             logging.info("Database not connected")
 
@@ -130,7 +134,7 @@ def _db_status():
     """Return whether the application can reach the configured Supabase/Postgres DB."""
     try:
         if DB_CONN is None:
-            return {"connected": False, "core_memories_count": 0}
+            return {"connected": False, "core_memories_count": 0, "error": DB_LAST_ERROR}
         with DB_CONN.cursor() as cur:
             cur.execute("SELECT 1")
             cur.fetchone()
@@ -139,9 +143,9 @@ def _db_status():
             count = len(MEMORIES) if isinstance(MEMORIES, list) else 0
         except Exception:
             count = 0
-        return {"connected": True, "core_memories_count": int(count)}
+        return {"connected": True, "core_memories_count": int(count), "error": None}
     except Exception:
-        return {"connected": False, "core_memories_count": 0}
+        return {"connected": False, "core_memories_count": 0, "error": DB_LAST_ERROR}
 
 
 @app.get("/debug/db")
@@ -181,6 +185,7 @@ def _debug_db():
         "db_url_port": (parsed.port if parsed else None),
         "db_url_db": (parsed.path.lstrip("/") if (parsed and parsed.path) else None),
         "db_conn_object": DB_CONN is not None,
+        "db_last_error": DB_LAST_ERROR,
         "memories_loaded": isinstance(MEMORIES, list),
         "memories_count": len(MEMORIES) if isinstance(MEMORIES, list) else 0,
         # Also show whether other common envs are set (booleans only)
