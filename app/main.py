@@ -388,15 +388,22 @@ def _message_suggests_recall(message: str) -> bool:
     if not isinstance(message, str) or not message.strip():
         return False
     m = message.lower()
-    return any(t in m for t in _RECALL_TRIGGERS)
+    triggered = any(t in m for t in _RECALL_TRIGGERS)
+    matched_triggers = [t for t in _RECALL_TRIGGERS if t in m] if triggered else []
+    logging.info(f"Life memory recall check: triggered={triggered}, matched={matched_triggers}")
+    return triggered
 
 
 def _search_life_memories(message: str, limit: int = 3) -> list[str]:
     """Simple keyword search against life_memories.content (ILIKE)."""
     if DB_CONN is None:
+        logging.warning("Life memory search skipped: DB_CONN is None")
         return []
     if not isinstance(message, str) or not message.strip():
+        logging.warning("Life memory search skipped: empty message")
         return []
+    
+    logging.info(f"Starting life memory search for message: {message[:100]}...")
 
     # Extract a few meaningful keywords from the message.
     tokens = [t.lower() for t in re.findall(r"[a-zA-Z0-9']+", message)]
@@ -477,20 +484,24 @@ def _search_life_memories(message: str, limit: int = 3) -> list[str]:
             break
 
     if not keywords:
+        logging.info("Life memory search: no keywords extracted from message")
         return []
 
+    logging.info(f"Life memory search keywords: {keywords}")
     clauses = " OR ".join(["content ILIKE %s"] * len(keywords))
     params = [f"%{k}%" for k in keywords]
 
     try:
         with DB_CONN.cursor() as cur:
-            cur.execute(
-                f"SELECT content FROM life_memories WHERE ({clauses}) LIMIT %s",
-                (*params, int(limit)),
-            )
+            query = f"SELECT content FROM life_memories WHERE ({clauses}) LIMIT %s"
+            logging.info(f"Executing life memory query with {len(keywords)} keywords, limit={limit}")
+            cur.execute(query, (*params, int(limit)))
             rows = cur.fetchall()
-        return [r[0] for r in rows if r and isinstance(r[0], str) and r[0].strip()]
-    except Exception:
+        results = [r[0] for r in rows if r and isinstance(r[0], str) and r[0].strip()]
+        logging.info(f"Life memory search returned {len(results)} results")
+        return results
+    except Exception as e:
+        logging.error(f"Life memory search failed: {type(e).__name__}: {e}")
         return []
 
 
@@ -679,7 +690,11 @@ def chat(data: ChatIn):
         try:
             if _message_suggests_recall(data.message):
                 life_memories = _search_life_memories(data.message, limit=3)
-        except Exception:
+                logging.info(f"Life memories retrieved: {len(life_memories)} items")
+            else:
+                logging.info("Life memory search skipped: message does not suggest recall")
+        except Exception as e:
+            logging.error(f"Life memory retrieval error: {type(e).__name__}: {e}")
             life_memories = []
         # Record last recall attempt for debugging/diagnostics
         try:
