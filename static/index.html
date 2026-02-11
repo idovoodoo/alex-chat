@@ -19,6 +19,104 @@
             flex-direction: column;
         }
 
+        .app-container {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        #sidebar {
+            width: 300px;
+            background: white;
+            border-right: 1px solid #ddd;
+            display: flex;
+            flex-direction: column;
+            transition: transform 0.3s ease;
+        }
+
+        #sidebar.hidden {
+            transform: translateX(-100%);
+        }
+
+        #sidebar-header {
+            background: #075e54;
+            color: white;
+            padding: 16px;
+            font-size: 18px;
+            font-weight: 600;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        #new-chat-btn {
+            background: #25d366;
+            border: none;
+            color: white;
+            padding: 8px 16px;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            transition: background 0.2s;
+        }
+
+        #new-chat-btn:hover {
+            background: #1fb855;
+        }
+
+        #chat-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px 0;
+        }
+
+        .chat-item {
+            padding: 12px 16px;
+            cursor: pointer;
+            border-bottom: 1px solid #f0f0f0;
+            transition: background 0.2s;
+        }
+
+        .chat-item:hover {
+            background: #f5f5f5;
+        }
+
+        .chat-item.active {
+            background: #e8f5e9;
+            border-left: 3px solid #075e54;
+        }
+
+        .chat-item-title {
+            font-weight: 600;
+            margin-bottom: 4px;
+            color: #333;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .chat-item-preview {
+            font-size: 12px;
+            color: #999;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .chat-item-time {
+            font-size: 11px;
+            color: #999;
+            margin-top: 2px;
+        }
+
+        #main-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+        }
+
         header {
             background: #075e54;
             color: white;
@@ -27,6 +125,23 @@
             font-size: 20px;
             font-weight: 600;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        #toggle-sidebar {
+            background: none;
+            border: none;
+            color: white;
+            font-size: 24px;
+            cursor: pointer;
+            padding: 4px 8px;
+            display: none;
+        }
+
+        #header-title {
+            flex: 1;
         }
 
         #chat-container {
@@ -132,6 +247,17 @@
 
         /* Mobile responsive */
         @media (max-width: 768px) {
+            #sidebar {
+                position: absolute;
+                height: 100%;
+                z-index: 1000;
+                box-shadow: 2px 0 8px rgba(0,0,0,0.1);
+            }
+
+            #toggle-sidebar {
+                display: block;
+            }
+
             #chat-container {
                 padding: 12px;
             }
@@ -184,26 +310,45 @@
     </style>
 </head>
 <body>
-    <header>Chat with Alex</header>
-    
-    <div id="chat-container">
-        <!-- Messages will appear here -->
-    </div>
+    <div class="app-container">
+        <!-- Sidebar with chat history -->
+        <div id="sidebar">
+            <div id="sidebar-header">
+                <span>Chats</span>
+                <button id="new-chat-btn">+ New Chat</button>
+            </div>
+            <div id="chat-list">
+                <!-- Chat items will appear here -->
+            </div>
+        </div>
 
-    <div class="typing-indicator" id="typing-indicator">
-        <span></span>
-        <span></span>
-        <span></span>
-    </div>
-    
-    <div id="input-container">
-        <input 
-            type="text" 
-            id="message-input" 
-            placeholder="Type a message..." 
-            autocomplete="off"
-        >
-        <button id="send-btn" aria-label="Send message">➤</button>
+        <!-- Main chat area -->
+        <div id="main-content">
+            <header>
+                <button id="toggle-sidebar" aria-label="Toggle sidebar">☰</button>
+                <div id="header-title">Chat with Alex</div>
+            </header>
+            
+            <div id="chat-container">
+                <!-- Messages will appear here -->
+            </div>
+
+            <div class="typing-indicator" id="typing-indicator">
+                <span></span>
+                <span></span>
+                <span></span>
+            </div>
+            
+            <div id="input-container">
+                <input 
+                    type="text" 
+                    id="message-input" 
+                    placeholder="Type a message..." 
+                    autocomplete="off"
+                >
+                <button id="send-btn" aria-label="Send message">➤</button>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -211,11 +356,130 @@
         const messageInput = document.getElementById('message-input');
         const sendBtn = document.getElementById('send-btn');
         const typingIndicator = document.getElementById('typing-indicator');
+        const chatList = document.getElementById('chat-list');
+        const newChatBtn = document.getElementById('new-chat-btn');
+        const toggleSidebarBtn = document.getElementById('toggle-sidebar');
+        const sidebar = document.getElementById('sidebar');
 
-        // Generate a simple session ID
-        const sessionId = 'session_' + Date.now();
+        // Chat management
+        let currentChatId = null;
+        let chats = {};
 
-        function addMessage(sender, text) {
+        // Load chats from localStorage
+        function loadChats() {
+            const savedChats = localStorage.getItem('alex_chats');
+            if (savedChats) {
+                chats = JSON.parse(savedChats);
+            }
+            
+            // If no chats exist, create a new one
+            if (Object.keys(chats).length === 0) {
+                createNewChat();
+            } else {
+                // Load the most recent chat
+                const chatIds = Object.keys(chats).sort((a, b) => chats[b].lastUpdated - chats[a].lastUpdated);
+                loadChat(chatIds[0]);
+            }
+            
+            renderChatList();
+        }
+
+        // Save chats to localStorage
+        function saveChats() {
+            localStorage.setItem('alex_chats', JSON.stringify(chats));
+        }
+
+        // Create a new chat
+        function createNewChat() {
+            const chatId = 'chat_' + Date.now();
+            chats[chatId] = {
+                id: chatId,
+                sessionId: 'session_' + Date.now(),
+                messages: [],
+                title: 'New Chat',
+                preview: '',
+                created: Date.now(),
+                lastUpdated: Date.now()
+            };
+            saveChats();
+            loadChat(chatId);
+            renderChatList();
+        }
+
+        // Load a specific chat
+        function loadChat(chatId) {
+            if (!chats[chatId]) return;
+            
+            currentChatId = chatId;
+            const chat = chats[chatId];
+            
+            // Clear current messages
+            chatContainer.innerHTML = '';
+            
+            // Render all messages from history
+            chat.messages.forEach(msg => {
+                addMessageToDOM(msg.sender, msg.text);
+            });
+            
+            // Update active state in sidebar
+            renderChatList();
+            
+            // Focus input
+            messageInput.focus();
+        }
+
+        // Render the chat list in sidebar
+        function renderChatList() {
+            chatList.innerHTML = '';
+            
+            const chatIds = Object.keys(chats).sort((a, b) => chats[b].lastUpdated - chats[a].lastUpdated);
+            
+            chatIds.forEach(chatId => {
+                const chat = chats[chatId];
+                const chatItem = document.createElement('div');
+                chatItem.className = 'chat-item' + (chatId === currentChatId ? ' active' : '');
+                chatItem.onclick = () => loadChat(chatId);
+                
+                const title = document.createElement('div');
+                title.className = 'chat-item-title';
+                title.textContent = chat.title;
+                
+                const preview = document.createElement('div');
+                preview.className = 'chat-item-preview';
+                preview.textContent = chat.preview || 'No messages yet';
+                
+                const time = document.createElement('div');
+                time.className = 'chat-item-time';
+                time.textContent = formatTime(chat.lastUpdated);
+                
+                chatItem.appendChild(title);
+                chatItem.appendChild(preview);
+                chatItem.appendChild(time);
+                chatList.appendChild(chatItem);
+            });
+        }
+
+        // Format timestamp
+        function formatTime(timestamp) {
+            const date = new Date(timestamp);
+            const now = new Date();
+            const diffMs = now - date;
+            const diffMins = Math.floor(diffMs / 60000);
+            
+            if (diffMins < 1) return 'Just now';
+            if (diffMins < 60) return `${diffMins}m ago`;
+            
+            const diffHours = Math.floor(diffMins / 60);
+            if (diffHours < 24) return `${diffHours}h ago`;
+            
+            const diffDays = Math.floor(diffHours / 24);
+            if (diffDays < 7) return `${diffDays}d ago`;
+            
+            return date.toLocaleDateString();
+        }
+
+        // Add message to DOM only
+        function addMessageToDOM(sender, text) {
             const messageDiv = document.createElement('div');
             messageDiv.className = 'message ' + (sender === 'You' ? 'user-message' : 'alex-message');
             
@@ -234,6 +498,30 @@
             chatContainer.scrollTop = chatContainer.scrollHeight;
         }
 
+        // Add message and save to chat history
+        function addMessage(sender, text) {
+            if (!currentChatId || !chats[currentChatId]) return;
+            
+            // Add to DOM
+            addMessageToDOM(sender, text);
+            
+            // Save to chat history
+            const chat = chats[currentChatId];
+            chat.messages.push({ sender, text, timestamp: Date.now() });
+            chat.lastUpdated = Date.now();
+            
+            // Update title from first user message
+            if (sender === 'You' && chat.title === 'New Chat') {
+                chat.title = text.substring(0, 30) + (text.length > 30 ? '...' : '');
+            }
+            
+            // Update preview with last message
+            chat.preview = text.substring(0, 50) + (text.length > 50 ? '...' : '');
+            
+            saveChats();
+            renderChatList();
+        }
+
         function showTyping(show) {
             typingIndicator.classList.toggle('active', show);
             if (show) {
@@ -243,7 +531,7 @@
 
         async function sendMessage() {
             const message = messageInput.value.trim();
-            if (!message) return;
+            if (!message || !currentChatId) return;
 
             // Disable input while processing
             messageInput.disabled = true;
@@ -257,6 +545,7 @@
             showTyping(true);
 
             try {
+                const chat = chats[currentChatId];
                 const response = await fetch('/chat', {
                     method: 'POST',
                     headers: {
@@ -264,7 +553,7 @@
                     },
                     body: JSON.stringify({
                         message: message,
-                        session_id: sessionId
+                        session_id: chat.sessionId
                     })
                 });
 
@@ -300,8 +589,14 @@
             }
         });
 
-        // Focus input on load
-        messageInput.focus();
+        newChatBtn.addEventListener('click', createNewChat);
+        
+        toggleSidebarBtn.addEventListener('click', () => {
+            sidebar.classList.toggle('hidden');
+        });
+
+        // Initialize
+        loadChats();
     </script>
 </body>
 </html>
