@@ -331,6 +331,25 @@ def _debug_db():
     except Exception as e:
         diagnostics["last_new_chat"] = f"error: {str(e)}"
     
+    # Show current conversation history state (for debugging)
+    diagnostics["_section_session_state"] = "=== ACTIVE SESSIONS ==="
+    try:
+        session_info = {}
+        for session_id, history in CONVERSATION_HISTORY.items():
+            if isinstance(history, list):
+                session_info[session_id] = {
+                    "message_count": len(history),
+                    "last_3_messages": [
+                        f"{msg.get('role', '?')}: {str(msg.get('content', ''))[:50]}..."
+                        for msg in history[-3:]
+                    ] if len(history) > 0 else []
+                }
+            else:
+                session_info[session_id] = "invalid (not a list)"
+        diagnostics["active_sessions"] = session_info if session_info else "No active sessions"
+    except Exception as e:
+        diagnostics["active_sessions"] = f"error: {str(e)}"
+    
     # Try to count memories in DB (unified table)
     if _ensure_db_connection():
         try:
@@ -692,7 +711,12 @@ def _summarize_conversation(session_history: list) -> str:
     No emotions, no temporary details, no speculation.
     Returns empty string if no durable fact exists or extraction fails.
     """
+    global LAST_NEW_CHAT_DEBUG
+    
     if not session_history or len(session_history) < 2:
+        if isinstance(LAST_NEW_CHAT_DEBUG, dict):
+            LAST_NEW_CHAT_DEBUG["summarize_skipped"] = "insufficient messages"
+        logging.info("_summarize_conversation: skipped (insufficient messages)")
         return ""
     
     # Build conversation text
@@ -702,6 +726,10 @@ def _summarize_conversation(session_history: list) -> str:
             conversation_text += f"User: {msg['content']}\n"
         elif msg["role"] == "assistant":
             conversation_text += f"Alex: {msg['content']}\n"
+    
+    if isinstance(LAST_NEW_CHAT_DEBUG, dict):
+        LAST_NEW_CHAT_DEBUG["conversation_text_length"] = len(conversation_text)
+        LAST_NEW_CHAT_DEBUG["conversation_preview"] = conversation_text[:200] + "..." if len(conversation_text) > 200 else conversation_text
     
     # Create strict summarization prompt
     summary_prompt = (
@@ -719,35 +747,88 @@ def _summarize_conversation(session_history: list) -> str:
     )
     
     try:
+        logging.info("_summarize_conversation: calling LLM for memory extraction...")
+        if isinstance(LAST_NEW_CHAT_DEBUG, dict):
+            LAST_NEW_CHAT_DEBUG["llm_call_1"] = "started"
+        
         # GPT-5 models can spend a lot of tokens on reasoning; keep enough headroom
         # so we reliably get an actual output sentence.
-        summary, _ = _openai_chat_completion(
+        summary, usage = _openai_chat_completion(
             model="gpt-5-mini",
             messages=[{"role": "user", "content": summary_prompt}],
             temperature=0.2,
             max_tokens=256,
         )
-
+        
+        # Track token usage
+        if isinstance(LAST_NEW_CHAT_DEBUG, dict) and usage:
+            if isinstance(usage, dict):
+                LAST_NEW_CHAT_DEBUG["llm_call_1_tokens"] = {
+                    "input": usage.get("prompt_tokens", 0),
+                    "output": usage.get("completion_tokens", 0),
+                    "total": usage.get("total_tokens", 0)
+                }
+            else:
+                LAST_NEW_CHAT_DEBUG["llm_call_1_tokens"] = {
+                    "input": getattr(usage, "prompt_tokens", 0),
+                    "output": getattr(usage, "completion_tokens", 0),
+                    "total": getattr(usage, "total_tokens", 0)
+                }
+        
         summary = (summary or "").strip()
+        logging.info(f"_summarize_conversation: LLM returned: '{summary}'")
+        if isinstance(LAST_NEW_CHAT_DEBUG, dict):
+            LAST_NEW_CHAT_DEBUG["llm_call_1_result"] = summary
 
         # Retry once if the model produced no visible output (e.g. used budget on reasoning).
         if not summary:
-            summary, _ = _openai_chat_completion(
+            logging.info("_summarize_conversation: retrying with higher token limit...")
+            if isinstance(LAST_NEW_CHAT_DEBUG, dict):
+                LAST_NEW_CHAT_DEBUG["llm_call_2"] = "started (retry)"
+            
+            summary, usage = _openai_chat_completion(
                 model="gpt-5-mini",
                 messages=[{"role": "user", "content": summary_prompt}],
                 temperature=0.2,
                 max_tokens=512,
             )
+            
+            if isinstance(LAST_NEW_CHAT_DEBUG, dict) and usage:
+                if isinstance(usage, dict):
+                    LAST_NEW_CHAT_DEBUG["llm_call_2_tokens"] = {
+                        "input": usage.get("prompt_tokens", 0),
+                        "output": usage.get("completion_tokens", 0),
+                        "total": usage.get("total_tokens", 0)
+                    }
+                else:
+                    LAST_NEW_CHAT_DEBUG["llm_call_2_tokens"] = {
+                        "input": getattr(usage, "prompt_tokens", 0),
+                        "output": getattr(usage, "completion_tokens", 0),
+                        "total": getattr(usage, "total_tokens", 0)
+                    }
+            
             summary = (summary or "").strip()
+            logging.info(f"_summarize_conversation: LLM retry returned: '{summary}'")
+            if isinstance(LAST_NEW_CHAT_DEBUG, dict):
+                LAST_NEW_CHAT_DEBUG["llm_call_2_result"] = summary
         
         # Skip if model says there's nothing important
         if summary.upper() == "NONE" or not summary:
+            logging.info("_summarize_conversation: no durable memory found")
+            if isinstance(LAST_NEW_CHAT_DEBUG, dict):
+                LAST_NEW_CHAT_DEBUG["final_result"] = "NONE or empty"
             return ""
         
         # Take only the first line if multiple were returned
         first_line = summary.split('\n')[0].strip()
+        logging.info(f"_summarize_conversation: extracted memory: '{first_line}'")
+        if isinstance(LAST_NEW_CHAT_DEBUG, dict):
+            LAST_NEW_CHAT_DEBUG["final_result"] = first_line
         return first_line
-    except Exception:
+    except Exception as e:
+        logging.error(f"_summarize_conversation: error: {type(e).__name__}: {e}")
+        if isinstance(LAST_NEW_CHAT_DEBUG, dict):
+            LAST_NEW_CHAT_DEBUG["summarize_error"] = f"{type(e).__name__}: {e}"
         return ""
 
 
@@ -849,7 +930,11 @@ def _save_life_memory(memory_line: str):
     Args:
         memory_line: A single memory string or multiple lines separated by newlines
     """
+    global LAST_NEW_CHAT_DEBUG
+    
     if not memory_line or not memory_line.strip():
+        if isinstance(LAST_NEW_CHAT_DEBUG, dict):
+            LAST_NEW_CHAT_DEBUG["save_life_memory_skipped"] = "empty memory"
         return
     
     try:
@@ -857,14 +942,29 @@ def _save_life_memory(memory_line: str):
             # Split multi-line memory into individual lines
             new_memories = [line.strip() for line in memory_line.split("\n") if line.strip()]
             
+            if isinstance(LAST_NEW_CHAT_DEBUG, dict):
+                LAST_NEW_CHAT_DEBUG["db_connection"] = "established"
+                LAST_NEW_CHAT_DEBUG["memories_to_insert"] = new_memories
+            
             # Insert each memory into the database
             with DB_CONN.cursor() as cur:
                 for mem in new_memories:
+                    logging.info(f"Executing INSERT for life memory: '{mem}'")
                     cur.execute("INSERT INTO memories (content, type) VALUES (%s, %s)", (mem, 'life'))
             DB_CONN.commit()
-            logging.info(f"Saved {len(new_memories)} life memories to database")
+            logging.info(f"Saved {len(new_memories)} life memories to database (committed)")
+            
+            if isinstance(LAST_NEW_CHAT_DEBUG, dict):
+                LAST_NEW_CHAT_DEBUG["db_insert_count"] = len(new_memories)
+                LAST_NEW_CHAT_DEBUG["db_commit"] = "success"
+        else:
+            logging.error("DB connection failed in _save_life_memory")
+            if isinstance(LAST_NEW_CHAT_DEBUG, dict):
+                LAST_NEW_CHAT_DEBUG["db_connection"] = "failed"
     except Exception as e:
         logging.error(f"Failed to save life_memory: {type(e).__name__}: {e}")
+        if isinstance(LAST_NEW_CHAT_DEBUG, dict):
+            LAST_NEW_CHAT_DEBUG["save_life_memory_error"] = f"{type(e).__name__}: {e}"
 
 
 def _trim_chunk_for_prompt(chunk: str, max_lines: int = 4) -> str:
@@ -1338,16 +1438,25 @@ def new_chat(data: NewChatIn):
             
             if summary:
                 # Check for duplicates using cosine similarity (threshold 0.85) against life memories
+                logging.info(f"Checking for duplicate memory: '{summary}'")
+                LAST_NEW_CHAT_DEBUG["duplicate_check"] = "started"
+                
                 is_duplicate = _check_duplicate_memory(summary, threshold=0.85, check_life_memories=True)
+                
+                LAST_NEW_CHAT_DEBUG["duplicate_check_result"] = is_duplicate
                 
                 if is_duplicate:
                     duplicate_detected = True
                     logging.info(f"Memory not saved (duplicate): {summary}")
+                    LAST_NEW_CHAT_DEBUG["save_action"] = "skipped (duplicate)"
                 else:
                     # Not a duplicate, save to memories table (type='life')
+                    logging.info(f"Saving new life memory: '{summary}'")
+                    LAST_NEW_CHAT_DEBUG["save_action"] = "attempting save"
                     _save_life_memory(summary)
                     summary_saved = True
                     logging.info(f"New life_memory saved: {summary}")
+                    LAST_NEW_CHAT_DEBUG["save_result"] = "success"
         else:
             LAST_NEW_CHAT_DEBUG["note"] = "no session history"
         
