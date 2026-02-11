@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 from urllib.parse import parse_qs, urlencode, urlunparse
 import socket
 import re
+from datetime import datetime
 
 import faiss
 import numpy as np
@@ -72,6 +73,7 @@ RAG_ERROR = None
 MEMORIES = None
 DB_CONN = None
 DB_LAST_ERROR = None
+LAST_LIFE_RECALL = None
 
 # In-memory conversation history per session
 CONVERSATION_HISTORY = {}
@@ -86,7 +88,6 @@ def _load_rag_assets():
     try:
         RAG_INDEX = faiss.read_index(faiss_path)
         with open(chunks_path, "r", encoding="utf-8") as f:
-    from datetime import datetime
             RAG_CHUNKS = json.load(f)
         if not isinstance(RAG_CHUNKS, list):
             raise ValueError("chunks.json must be a JSON array")
