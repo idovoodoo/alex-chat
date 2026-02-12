@@ -138,6 +138,9 @@ LAST_LIFE_RECALL = None
 LIFE_RECALL_DEBUG = None
 LAST_NEW_CHAT_DEBUG = None
 
+# Per-session progress state for /new_chat operations (frontend can poll)
+NEW_CHAT_PROGRESS: dict = {}
+
 # In-memory conversation history per session
 CONVERSATION_HISTORY = {}
 
@@ -503,6 +506,10 @@ def _build_core_memory_embeddings() -> None:
         CORE_MEMORY_TEXTS = kept_texts
         CORE_MEMORY_EMBEDDINGS = np.vstack(vectors).astype(np.float32)
         logging.info(f"Embedded {len(kept_texts)} core memories for similarity search")
+        try:
+            _log_debug_to_console("core_mem_build")
+        except Exception:
+            pass
     except Exception as e:
         CORE_MEMORY_TEXTS = []
         CORE_MEMORY_EMBEDDINGS = None
@@ -534,6 +541,30 @@ def _retrieve_top_chunks(query: str, k: int = 2) -> tuple[list[str], int]:
             if isinstance(chunk, str) and chunk.strip():
                 results.append(chunk.strip())
     return results, int(emb_tokens)
+
+
+def _log_debug_to_console(tag: str = "") -> None:
+    """Dump relevant debug globals to server console as JSON for easy viewing.
+
+    Includes LAST_NEW_CHAT_DEBUG, LIFE_RECALL_DEBUG, LAST_LIFE_RECALL, DB_LAST_ERROR,
+    and core memory embedding counts.
+    """
+    try:
+        payload = {
+            "tag": tag,
+            "LAST_NEW_CHAT_DEBUG": LAST_NEW_CHAT_DEBUG if isinstance(LAST_NEW_CHAT_DEBUG, dict) else None,
+            "LIFE_RECALL_DEBUG": LIFE_RECALL_DEBUG if isinstance(LIFE_RECALL_DEBUG, dict) else None,
+            "LAST_LIFE_RECALL": LAST_LIFE_RECALL if isinstance(LAST_LIFE_RECALL, dict) else LAST_LIFE_RECALL,
+            "DB_LAST_ERROR": DB_LAST_ERROR,
+            "core_memory_embeddings_built": bool(CORE_MEMORY_EMBEDDINGS is not None and CORE_MEMORY_TEXTS is not None),
+            "core_memory_embeddings_count": int(len(CORE_MEMORY_TEXTS) if isinstance(CORE_MEMORY_TEXTS, list) else 0),
+        }
+        s = json.dumps(payload, ensure_ascii=False, default=str)
+        if len(s) > 16000:
+            s = s[:16000] + "…(truncated)"
+        logging.info(f"DEBUG_CONSOLE: {s}")
+    except Exception:
+        logging.exception("DEBUG_CONSOLE: failed to serialize debug state")
 
 
 def _select_memories(query: str, k: int = 5) -> list[str]:
@@ -1252,6 +1283,10 @@ def chat(data: ChatIn):
             "timestamp": datetime.utcnow().isoformat(),
             "message": data.message[:100]
         }
+        try:
+            _log_debug_to_console("chat_life_recall_start")
+        except Exception:
+            pass
         
         # Check what type of question this is
         suggests_recall = _message_suggests_recall(data.message)
@@ -1276,6 +1311,10 @@ def chat(data: ChatIn):
             LIFE_RECALL_DEBUG["error"] = f"{type(e).__name__}: {e}"
             logging.error(f"Life memory retrieval error: {type(e).__name__}: {e}")
             life_memories = []
+        try:
+            _log_debug_to_console("chat_life_recall_done")
+        except Exception:
+            pass
         # Record last recall attempt for debugging/diagnostics
         try:
             global LAST_LIFE_RECALL
@@ -1581,10 +1620,25 @@ def new_chat(data: NewChatIn):
         "timestamp": datetime.utcnow().isoformat(),
         "session_id": data.session_id,
     }
+    try:
+        _log_debug_to_console("new_chat_started")
+    except Exception:
+        pass
 
     try:
         # Get the conversation history for this session
         session_history = CONVERSATION_HISTORY.get(data.session_id, [])
+
+        # Initialize progress state for frontend polling
+        try:
+            NEW_CHAT_PROGRESS[data.session_id] = {
+                "status": "started",
+                "progress": 0,
+                "message": "starting new chat",
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+        except Exception:
+            pass
 
         LAST_NEW_CHAT_DEBUG["history_messages"] = int(len(session_history) if isinstance(session_history, list) else 0)
         
@@ -1595,7 +1649,16 @@ def new_chat(data: NewChatIn):
         # If there's conversation history, summarize and save it
         if session_history:
             # Extract 0..N personal memory lines (one per line)
+            NEW_CHAT_PROGRESS[data.session_id]["status"] = "summarizing"
+            NEW_CHAT_PROGRESS[data.session_id]["progress"] = 10
+            NEW_CHAT_PROGRESS[data.session_id]["message"] = "summarizing conversation"
+            try:
+                _log_debug_to_console("new_chat_summarize_start")
+            except Exception:
+                pass
+
             summary = _summarize_conversation(session_history)
+            NEW_CHAT_PROGRESS[data.session_id]["progress"] = 30
             extracted_memory = summary
 
             LAST_NEW_CHAT_DEBUG["extracted_memory"] = summary
@@ -1610,13 +1673,17 @@ def new_chat(data: NewChatIn):
             if summary:
                 # Split into separate DB entries (one per line) and apply duplicate check per entry.
                 candidate_lines = [ln.strip() for ln in str(summary).split("\n") if ln.strip()]
+                NEW_CHAT_PROGRESS[data.session_id]["status"] = "checking_duplicates"
+                NEW_CHAT_PROGRESS[data.session_id]["progress"] = 40
+                NEW_CHAT_PROGRESS[data.session_id]["message"] = f"{len(candidate_lines)} candidate(s) to check"
                 LAST_NEW_CHAT_DEBUG["candidate_memory_lines"] = candidate_lines
 
                 saved_lines: list[str] = []
                 skipped_duplicates: list[str] = []
                 LAST_NEW_CHAT_DEBUG["duplicate_check"] = "started"
 
-                for line in candidate_lines:
+                total = len(candidate_lines)
+                for idx, line in enumerate(candidate_lines, start=1):
                     try:
                         is_duplicate = _check_duplicate_memory(line, threshold=0.85, check_life_memories=True)
                     except Exception:
@@ -1625,12 +1692,24 @@ def new_chat(data: NewChatIn):
                     if is_duplicate:
                         duplicate_detected = True
                         skipped_duplicates.append(line)
+                        # update progress
+                        try:
+                            NEW_CHAT_PROGRESS[data.session_id]["message"] = f"skipped duplicate ({len(skipped_duplicates)})"
+                            NEW_CHAT_PROGRESS[data.session_id]["progress"] = 40 + int((idx/total) * 40)
+                        except Exception:
+                            pass
                         continue
 
                     try:
                         _save_life_memory(line)
                         saved_lines.append(line)
                         summary_saved = True
+                        # update progress
+                        try:
+                            NEW_CHAT_PROGRESS[data.session_id]["message"] = f"saved {len(saved_lines)} of {total}"
+                            NEW_CHAT_PROGRESS[data.session_id]["progress"] = 40 + int((idx/total) * 40)
+                        except Exception:
+                            pass
                     except Exception:
                         pass
 
@@ -1640,6 +1719,18 @@ def new_chat(data: NewChatIn):
                 }
                 LAST_NEW_CHAT_DEBUG["saved_lines"] = saved_lines
                 LAST_NEW_CHAT_DEBUG["skipped_duplicates"] = skipped_duplicates
+                try:
+                    _log_debug_to_console("new_chat_saved_lines")
+                except Exception:
+                    pass
+                # mark complete
+                try:
+                    NEW_CHAT_PROGRESS[data.session_id]["status"] = "done"
+                    NEW_CHAT_PROGRESS[data.session_id]["progress"] = 100
+                    NEW_CHAT_PROGRESS[data.session_id]["message"] = f"saved {len(saved_lines)} new memory(ies), skipped {len(skipped_duplicates)} duplicates"
+                    NEW_CHAT_PROGRESS[data.session_id]["completed_at"] = datetime.utcnow().isoformat()
+                except Exception:
+                    pass
         else:
             LAST_NEW_CHAT_DEBUG["note"] = "no session history"
         
@@ -1647,6 +1738,7 @@ def new_chat(data: NewChatIn):
         if data.session_id in CONVERSATION_HISTORY:
             del CONVERSATION_HISTORY[data.session_id]
 
+        # Optionally keep progress for a short time; we do not auto-delete here.
         LAST_NEW_CHAT_DEBUG["summary_saved"] = bool(summary_saved)
         LAST_NEW_CHAT_DEBUG["duplicate_detected"] = bool(duplicate_detected)
         
@@ -1663,4 +1755,30 @@ def new_chat(data: NewChatIn):
             LAST_NEW_CHAT_DEBUG["error"] = f"{type(e).__name__}: {e}"
         except Exception:
             pass
+        try:
+            # mark progress as failed
+            NEW_CHAT_PROGRESS[data.session_id] = {
+                "status": "error",
+                "progress": NEW_CHAT_PROGRESS.get(data.session_id, {}).get("progress", 0),
+                "message": str(e),
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+        except Exception:
+            pass
         return {"error": str(e)}
+
+
+@app.get("/new_chat_progress/{session_id}")
+def new_chat_progress(session_id: str):
+    """Return the current progress state for a `/new_chat` operation for a session.
+
+    Frontend can poll this endpoint to power a popup/progress bar.
+    """
+    try:
+        state = NEW_CHAT_PROGRESS.get(session_id)
+        if state is None:
+            return {"session_id": session_id, "status": "not_found"}
+        return {"session_id": session_id, "state": state}
+    except Exception as e:
+        logging.error(f"new_chat_progress error: {type(e).__name__}: {e}")
+        return {"session_id": session_id, "status": "error", "error": str(e)}
