@@ -281,7 +281,7 @@ def _load_rag_assets():
                     """)
                     if not cur.fetchone():
                         logging.info("Adding normalized_hash column to memories table...")
-                        cur.execute("ALTER TABLE memories ADD COLUMN normalized_hash VARCHAR(64)")
+                        cur.execute("ALTER TABLE memories ADD COLUMN normalized_hash TEXT")
                         cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_type_hash ON memories(type, normalized_hash)")
                         DB_CONN.commit()
                         logging.info("Migration complete: normalized_hash column and index added")
@@ -1363,17 +1363,25 @@ def _check_duplicate_memory(new_memory: str, threshold: float = 0.85, check_life
         try:
             new_hash = _compute_memory_hash(new_memory)
             if _ensure_db_connection():
-                with DB_CONN.cursor() as cur:
-                    cur.execute(
-                        "SELECT COUNT(*) FROM memories WHERE type = 'life' AND normalized_hash = %s",
-                        (new_hash,)
-                    )
-                    count = cur.fetchone()[0]
-                    if count > 0:
-                        logging.info(f"Duplicate life memory detected (exact normalized hash match)")
-                        return True
+                try:
+                    with DB_CONN.cursor() as cur:
+                        cur.execute(
+                            "SELECT COUNT(*) FROM memories WHERE type = 'life' AND normalized_hash = %s",
+                            (new_hash,)
+                        )
+                        count = cur.fetchone()[0]
+                        if count > 0:
+                            logging.info(f"Duplicate life memory detected (exact normalized hash match)")
+                            return True
+                except Exception as e:
+                    # If the normalized_hash column doesn't exist, skip hash-check gracefully
+                    msg = str(e).lower()
+                    if 'normalized_hash' in msg or 'undefinedcolumn' in msg or 'column \"normalized_hash\"' in msg:
+                        logging.warning("Hash duplicate check skipped: normalized_hash column missing in DB")
+                    else:
+                        logging.warning(f"Hash duplicate check failed: {type(e).__name__}: {e}")
         except Exception as e:
-            logging.warning(f"Hash duplicate check failed: {type(e).__name__}: {e}")
+            logging.warning(f"Hash duplicate check preparation failed: {type(e).__name__}: {e}")
             # Continue to embedding check on error
     
     # STEP 2: Check for paraphrase duplicates using embeddings    
@@ -1491,17 +1499,33 @@ def _save_life_memory(memory_line: str):
                 LAST_NEW_CHAT_DEBUG["db_connection"] = "established"
                 LAST_NEW_CHAT_DEBUG["memories_to_insert"] = new_memories
 
-            # Insert each memory into the database with normalized_hash
+            # Insert each memory into the database with normalized_hash when available.
+            # If the DB schema hasn't been migrated (column missing), fall back to the legacy insert.
             with DB_CONN.cursor() as cur:
                 for mem in new_memories:
                     mem_hash = _compute_memory_hash(mem)
                     logging.info(f"Executing INSERT for life memory: '{mem}' (hash: {mem_hash[:16]}...)")
-                    # Use ON CONFLICT DO NOTHING to prevent race-condition duplicates
-                    cur.execute(
-                        "INSERT INTO memories (content, type, normalized_hash) VALUES (%s, %s, %s) ON CONFLICT (type, normalized_hash) DO NOTHING",
-                        (mem, 'life', mem_hash)
-                    )
-            DB_CONN.commit()
+                    try:
+                        # Try modern insert with normalized_hash + ON CONFLICT
+                        cur.execute(
+                            "INSERT INTO memories (content, type, normalized_hash) VALUES (%s, %s, %s) ON CONFLICT (type, normalized_hash) DO NOTHING",
+                            (mem, 'life', mem_hash)
+                        )
+                    except Exception as e:
+                        # If column missing or migration not applied, fall back quietly to legacy insert
+                        msg = str(e).lower()
+                        if 'normalized_hash' in msg or 'undefinedcolumn' in msg or 'column \"normalized_hash\"' in msg:
+                            logging.warning("normalized_hash column missing; falling back to legacy insert for life memories")
+                            try:
+                                cur.execute("INSERT INTO memories (content, type) VALUES (%s, %s)", (mem, 'life'))
+                            except Exception as e2:
+                                logging.error(f"Failed legacy insert for life memory: {type(e2).__name__}: {e2}")
+                        else:
+                            logging.error(f"Failed to insert life memory: {type(e).__name__}: {e}")
+            try:
+                DB_CONN.commit()
+            except Exception as e:
+                logging.error(f"DB commit failed after inserting life memories: {type(e).__name__}: {e}")
             logging.info(f"Saved {len(new_memories)} life memories to database (committed)")
 
             # Incrementally append new embeddings to in-memory cache (avoid full rebuild)
