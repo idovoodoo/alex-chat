@@ -820,7 +820,7 @@
             <header>
                 <div class="header-left">
                     <div class="avatar-stack">
-                        <img id="alex-avatar" src="/static/images/alex-profile.webp" alt="Alex profile photo" width="40" height="40" />
+                        <img id="alex-avatar" src="/static/images/alex-profile.webp" alt="Alex profile photo" width="60" height="60" />
                     </div>
                     <div class="brand">
                         <div class="header-main-title">Alexi, an Alex Chatbot</div>
@@ -1170,6 +1170,21 @@
                                     
                                     if (state.status === 'done' || state.status === 'error') {
                                         clearInterval(pollInterval);
+                                        
+                                        // Display token summary if available
+                                        if (state.token_summary) {
+                                            const ts = state.token_summary;
+                                            console.log('====================================');
+                                            console.log('=== CHAT SESSION TOKEN SUMMARY ===');
+                                            console.log('====================================');
+                                            console.log(`Total Tokens: ${ts.total_tokens}`);
+                                            console.log(`  Input:  ${ts.input_tokens}`);
+                                            console.log(`  Output: ${ts.output_tokens}`);
+                                            console.log(`API Calls: ${ts.calls_total}`);
+                                            console.log('Full details:', ts);
+                                            console.log('====================================');
+                                        }
+                                        
                                         setTimeout(() => {
                                             progressModal.classList.add('hidden');
                                             createNewChatLocal();

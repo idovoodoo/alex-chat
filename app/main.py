@@ -1711,8 +1711,9 @@ def chat(data: ChatIn):
                 "time": datetime.utcnow().isoformat(),
                 "calls": token_calls,
             })
-        except Exception:
-            pass
+            logging.info(f"[TOKEN_DEBUG] Recorded {len(token_calls)} token call(s) for session {data.session_id}. Total entries: {len(lst)}")
+        except Exception as e:
+            logging.error(f"[TOKEN_DEBUG] Error recording token calls: {type(e).__name__}: {e}")
 
         # Aggregate totals
         total_input = sum(int(c.get("input_tokens", 0)) for c in token_calls)
@@ -1974,8 +1975,11 @@ def new_chat(data: NewChatIn):
         LAST_NEW_CHAT_DEBUG["duplicate_detected"] = bool(duplicate_detected)
         # Before clearing session history, if we have token logs for this session,
         # compute totals and write them to the server console (as requested).
+        token_summary = None
         try:
             toklog = SESSION_TOKEN_LOGS.get(data.session_id)
+            logging.info(f"[TOKEN_DEBUG] session_id={data.session_id}, toklog_exists={toklog is not None}, toklog_type={type(toklog).__name__ if toklog is not None else 'None'}, toklog_length={len(toklog) if isinstance(toklog, list) else 'N/A'}")
+            
             if isinstance(toklog, list) and toklog:
                 # Flatten all calls across the session
                 flat_calls = []
@@ -1988,7 +1992,7 @@ def new_chat(data: NewChatIn):
                 total_out = sum(int(c.get('output_tokens', 0)) for c in flat_calls)
                 total_sum = sum(int(c.get('total_tokens', 0)) for c in flat_calls)
 
-                payload = {
+                token_summary = {
                     'session_id': data.session_id,
                     'entries': len(toklog),
                     'calls_total': len(flat_calls),
@@ -1999,25 +2003,29 @@ def new_chat(data: NewChatIn):
                 }
 
                 # Log the token summary to the server console (Render logs)
+                logging.info(f"Session token summary: {json.dumps(token_summary, default=str, ensure_ascii=False)}")
+                
+                # Add token_summary to progress state so frontend can display it
                 try:
-                    logging.info(f"Session token summary: {json.dumps(payload, default=str, ensure_ascii=False)}")
-                except Exception:
-                    logging.info(f"Session token summary (session={data.session_id}): in={total_in} out={total_out} total={total_sum}")
-
-                # clear the runtime token log for this session now we've reported it
-                try:
-                    del SESSION_TOKEN_LOGS[data.session_id]
+                    if data.session_id in NEW_CHAT_PROGRESS:
+                        NEW_CHAT_PROGRESS[data.session_id]["token_summary"] = token_summary
                 except Exception:
                     pass
-        except Exception:
-            pass
+                
+                # clear the runtime token log for this session now we've reported it
+                del SESSION_TOKEN_LOGS[data.session_id]
+            else:
+                logging.info(f"[TOKEN_DEBUG] No token log to report for session {data.session_id}")
+        except Exception as e:
+            logging.error(f"[TOKEN_DEBUG] Error generating token summary: {type(e).__name__}: {e}")
 
         return {
             "status": "ok",
             "message": "New chat started",
             "summary_saved": summary_saved,
             "duplicate_detected": duplicate_detected,
-            "extracted_memory": extracted_memory
+            "extracted_memory": extracted_memory,
+            "token_summary": token_summary
         }
     except Exception as e:
         logging.error(f"Error in new_chat: {type(e).__name__}: {e}")
