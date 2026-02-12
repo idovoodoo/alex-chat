@@ -918,18 +918,25 @@ def _summarize_conversation(session_history: list, user_name: str = "User") -> s
     summary_prompt = (
         "Convert this chat into personal memory entries.\n\n"
         "Rules:\n"
-        "- Output 1 to 5 short factual sentences, EACH on its own line.\n"
+        "- Output 0 to 5 short factual sentences, EACH on its own line.\n"
         "- Each sentence must be about the user, Alex, or someone in their lives.\n"
         "- Each sentence must describe a DURABLE fact: preferences, traits, past experiences, future plans with dates, relationships, or ongoing situations.\n"
         "- Use only information stated by the USER. Ignore anything said by Alex/assistant.\n"
         "- Do NOT output general knowledge, definitions, or explanations.\n"
         "- Do NOT restate or summarize AI answers.\n"
         "- If no valid personal/contextual memory exists, output exactly: NONE\n\n"
+        "CRITICAL - 6-MONTH DURABILITY TEST:\n"
+        "- ONLY save facts that would still matter in 6 months.\n"
+        "- Ask: Would this fact be relevant or useful to recall months or years from now?\n"
+        "- If the answer is NO, do NOT save it.\n"
+        "- Examples to EXCLUDE: typos, minor edits, UI tweaks, debug actions, temporary tasks, session-specific events, what someone is doing right now.\n"
+        "- Examples to INCLUDE: lasting preferences, significant life events, major plans with dates, personality traits, relationships, hobbies.\n\n"
         "CRITICAL - EXCLUDE IMMEDIATE/TRANSIENT ACTIVITIES:\n"
         "- Do NOT capture what someone is doing RIGHT NOW (e.g., 'Steve is going to the shops', 'Abi is playing TF2').\n"
         "- Do NOT capture temporary states, current locations, or immediate plans without specific dates.\n"
+        "- Do NOT capture trivial events: typos, minor code changes, UI adjustments, debug sessions, temporary bug fixes.\n"
         "- ONLY capture: preferences (likes/dislikes), past events, future plans with dates/context, habits, relationships, or ongoing situations.\n"
-        "- Examples to EXCLUDE: 'X is playing Y', 'X is at the store', 'X is doing homework'.\n"
+        "- Examples to EXCLUDE: 'X is playing Y', 'X is at the store', 'X fixed a typo', 'X updated the UI', 'X is debugging'.\n"
         "- Examples to INCLUDE: 'Steve loves playing football', 'Alex went skiing in France in 2025', 'Abi is planning to visit Japan in March'.\n\n"
         "CRITICAL - Use actual names, NOT pronouns:\n"
         f"- The user's name is '{user_name}'. Replace 'I' with '{user_name}'.\n"
@@ -1023,6 +1030,26 @@ def _summarize_conversation(session_history: list, user_name: str = "User") -> s
             " are at ",
             " are doing ",
             " are watching ",
+            # Trivial/short-term events (6-month durability filter)
+            " fixed a typo ",
+            " typo ",
+            " updated the ui ",
+            " changed the ui ",
+            " ui change ",
+            " debugging ",
+            " debug ",
+            " is debugging ",
+            " temporary ",
+            " for now ",
+            " right now ",
+            " at the moment ",
+            " currently ",
+            " session ",
+            " minor edit ",
+            " small change ",
+            " quick fix ",
+            " tweaked ",
+            " adjusted ",
         )
 
         cleaned: list[str] = []
