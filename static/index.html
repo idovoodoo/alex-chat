@@ -202,9 +202,31 @@
                 font-weight: 600;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 display: flex;
+                flex-direction: column; /* mobile: two stacked rows */
+                gap: 8px;
+            }
+
+            .header-top, .header-bottom {
+                display: flex;
                 align-items: center;
                 justify-content: space-between;
                 gap: 12px;
+                width: 100%;
+            }
+
+            .header-left-top { display:flex; align-items:center; gap:12px; }
+            .header-right-top { display:flex; align-items:center; gap:8px; }
+
+            .header-left-bottom { display:flex; align-items:center; gap:10px; }
+            .header-right-bottom { display:flex; align-items:center; gap:8px; }
+
+            /* Ensure avatar and brand align nicely */
+            .header-left-top .brand { display:flex; flex-direction:column; color:#fff; }
+
+            /* Desktop: use single-row layout like before */
+            @media (min-width: 769px) {
+                header { flex-direction: row; align-items:center; }
+                .header-top, .header-bottom { width: auto; }
             }
 
         /* Header regions for WhatsApp-like layout */
@@ -818,28 +840,35 @@
         <!-- Main chat area -->
         <div id="main-content">
             <header>
-                <div class="header-left">
-                    <div class="avatar-stack">
-                        <img id="alex-avatar" src="/static/images/alex-profile.webp" alt="Alex profile photo" width="60" height="60" />
+                <div class="header-top">
+                    <div class="header-left-top">
+                        <div class="avatar-stack">
+                            <img id="alex-avatar" src="/static/images/alex-profile.webp" alt="Alex profile photo" width="60" height="60" />
+                        </div>
+                        <div class="brand">
+                            <div class="header-main-title">Alexi, an Alex Chatbot</div>
+                        </div>
                     </div>
-                    <div class="brand">
-                        <div class="header-main-title">Alexi, an Alex Chatbot</div>
+
+                    <div class="header-right-top">
+                        <button id="new-chat-btn" class="app-btn primary-btn large">+ New Chat</button>
                     </div>
-                    <button id="new-chat-btn" class="app-btn primary-btn large">+ New Chat</button>
                 </div>
 
-                <div class="header-center">
-                    <div class="header-sub">Chatting as</div>
-                    <div id="current-user-wrap"><span id="current-user-display"></span><button id="change-user-btn" class="app-btn" title="Change user">Change</button></div>
-                </div>
+                <div class="header-bottom">
+                    <div class="header-left-bottom">
+                        <div class="header-sub">Chatting as</div>
+                        <div id="current-user-wrap"><span id="current-user-display"></span><button id="change-user-btn" class="app-btn" title="Change user">Change</button></div>
+                    </div>
 
-                <div class="header-right">
-                    <button id="show-chats-btn" class="app-btn icon-btn" aria-label="Show chat history" title="Chat History">📋</button>
-                    <button id="settings-btn" class="app-btn icon-btn" title="Settings" aria-label="Settings">⚙️</button>
-                </div>
-                    <div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px;">
-                    <div id="token-usage">In: - | Out: -</div>
-                    <div id="db-status" style="font-size:12px;color:#fff;opacity:0.85">DB: Unknown</div>
+                    <div class="header-right-bottom">
+                        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px;margin-right:8px;">
+                            <div id="token-usage">In: - | Out: -</div>
+                            <div id="db-status" style="font-size:12px;color:#fff;opacity:0.85">DB: Unknown</div>
+                        </div>
+                        <button id="show-chats-btn" class="app-btn icon-btn" aria-label="Show chat history" title="Chat History">📋</button>
+                        <button id="settings-btn" class="app-btn icon-btn" title="Settings" aria-label="Settings">⚙️</button>
+                    </div>
                 </div>
             </header>
             <!-- Settings panel modal -->
@@ -1171,6 +1200,11 @@
                                     if (state.status === 'done' || state.status === 'error') {
                                         clearInterval(pollInterval);
                                         
+                                        // Debug: Log the entire state object
+                                        console.log('[TOKEN_DEBUG] New chat completed. Full state:', state);
+                                        console.log('[TOKEN_DEBUG] token_summary exists?', 'token_summary' in state);
+                                        console.log('[TOKEN_DEBUG] token_summary value:', state.token_summary);
+                                        
                                         // Display token summary if available
                                         if (state.token_summary) {
                                             const ts = state.token_summary;
@@ -1183,6 +1217,8 @@
                                             console.log(`API Calls: ${ts.calls_total}`);
                                             console.log('Full details:', ts);
                                             console.log('====================================');
+                                        } else {
+                                            console.log('[TOKEN_DEBUG] No token summary found in state');
                                         }
                                         
                                         setTimeout(() => {
