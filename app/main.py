@@ -139,6 +139,7 @@ DB_LAST_ERROR = None
 LAST_LIFE_RECALL = None
 LIFE_RECALL_DEBUG = None
 LAST_NEW_CHAT_DEBUG = None
+LAST_DEBUG_CONSOLE: str | None = None
 
 # Per-session progress state for /new_chat operations (frontend can poll)
 NEW_CHAT_PROGRESS: dict = {}
@@ -434,6 +435,23 @@ def _debug_db():
     return diagnostics
 
 
+@app.get("/debug/last_console")
+def _debug_last_console():
+    """Return the last DEBUG_CONSOLE payload (for frontend-only browser logging).
+
+    The frontend can fetch this and `console.log` it so server logs are not noisy.
+    """
+    try:
+        if LAST_DEBUG_CONSOLE:
+            try:
+                return json.loads(LAST_DEBUG_CONSOLE)
+            except Exception:
+                return {"raw": LAST_DEBUG_CONSOLE}
+        return {"raw": None}
+    except Exception:
+        return {"raw": None}
+
+
 def estimate_tokens(text: str) -> int:
     """Rudimentary token estimator when exact usage isn't available.
 
@@ -638,7 +656,13 @@ def _log_debug_to_console(tag: str = "") -> None:
         s = json.dumps(payload, ensure_ascii=False, default=str)
         if len(s) > 16000:
             s = s[:16000] + "…(truncated)"
-        logging.info(f"DEBUG_CONSOLE: {s}")
+        # Store the latest debug console payload in-memory so the frontend
+        # can fetch and print it to the browser console. Do NOT log to server.
+        try:
+            global LAST_DEBUG_CONSOLE
+            LAST_DEBUG_CONSOLE = s
+        except Exception:
+            pass
     except Exception:
         logging.exception("DEBUG_CONSOLE: failed to serialize debug state")
 
@@ -1638,6 +1662,18 @@ def chat(data: ChatIn):
             "If the information isn't in the memories, ask a short clarifying question (e.g., 'when was that?', 'who was there?', 'where did we go?') instead of just saying 'idk'. "
             "NEVER invent or guess places, dates, events, or people."
         )
+            # Language guardrails: narrow British tone without overriding RAG style weighting
+            system_prompt += (
+                "\n\nLanguage Guardrails:\n"
+                "- RAG style examples take priority.\n"
+                "- Apply these constraints only when the model would otherwise default to generic or American phrasing.\n"
+                "- Follow the tone demonstrated in the style examples above.\n"
+                "- Use British English spelling (e.g., colour, favourite, realise).\n"
+                "- Avoid American slang or idioms.\n"
+                "- Avoid post-2021 internet or Gen-Z slang.\n"
+                "- Tone reflects Midlands, England (2001–2021 era).\n"
+                "- If unsure, default to standard British English.\n"
+            )
 
         # Add context if chatting with Steve or Abi from the logs
         if data.user_name.lower() in ['steve', 'abi']:
