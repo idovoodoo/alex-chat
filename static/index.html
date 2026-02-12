@@ -39,28 +39,80 @@
             overflow: hidden;
         }
 
-        #sidebar {
-            width: 300px;
+        /* Chat History Overlay Panel */
+        #chat-history-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 2000;
+            display: none;
+            align-items: flex-start;
+            justify-content: center;
+            padding: 20px;
+            animation: fadeIn 0.2s ease;
+        }
+
+        #chat-history-overlay.active {
+            display: flex;
+        }
+
+        #chat-history-panel {
             background: white;
-            border-right: 1px solid #ddd;
+            border-radius: 12px;
+            max-width: 600px;
+            width: 100%;
+            max-height: 80vh;
             display: flex;
             flex-direction: column;
-            transition: transform 0.3s ease;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+            animation: slideDown 0.3s ease;
         }
 
-        #sidebar.hidden {
-            transform: translateX(-100%);
+        @keyframes slideDown {
+            from {
+                opacity: 0;
+                transform: translateY(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
         }
 
-        #sidebar-header {
+        #chat-history-header {
             background: #075e54;
             color: white;
-            padding: 16px;
+            padding: 16px 20px;
             font-size: 18px;
             font-weight: 600;
             display: flex;
             justify-content: space-between;
             align-items: center;
+            border-radius: 12px 12px 0 0;
+        }
+
+        #close-chat-history {
+            background: none;
+            border: none;
+            color: white;
+            font-size: 28px;
+            cursor: pointer;
+            padding: 0;
+            width: 32px;
+            height: 32px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 50%;
+            transition: background 0.2s;
+            line-height: 1;
+        }
+
+        #close-chat-history:hover {
+            background: rgba(255,255,255,0.1);
         }
 
         #new-chat-btn {
@@ -73,6 +125,10 @@
             font-size: 14px;
             font-weight: 600;
             transition: background 0.2s;
+            min-height: 40px;
+            min-width: 44px;
+            -webkit-tap-highlight-color: transparent;
+            user-select: none;
         }
 
         #new-chat-btn:hover {
@@ -82,23 +138,29 @@
         #chat-list {
             flex: 1;
             overflow-y: auto;
-            padding: 8px 0;
+            padding: 8px;
+            -webkit-overflow-scrolling: touch;
         }
 
         .chat-item {
-            padding: 12px 16px;
+            padding: 16px;
             cursor: pointer;
             border-bottom: 1px solid #f0f0f0;
-            transition: background 0.2s;
+            border-radius: 8px;
+            margin-bottom: 8px;
+            transition: all 0.2s;
+            position: relative;
         }
 
         .chat-item:hover {
             background: #f5f5f5;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         }
 
         .chat-item.active {
             background: #e8f5e9;
-            border-left: 3px solid #075e54;
+            border-left: 4px solid #075e54;
+            box-shadow: 0 2px 8px rgba(7,94,84,0.2);
         }
 
         .chat-item-title {
@@ -129,6 +191,7 @@
             display: flex;
             flex-direction: column;
             position: relative;
+            width: 100%;
         }
 
         header {
@@ -144,44 +207,26 @@
             gap: 12px;
         }
 
-        #toggle-sidebar {
-            background: none;
-            border: none;
+        #show-chats-btn {
+            background: rgba(255,255,255,0.1);
+            border: 1px solid rgba(255,255,255,0.2);
             color: white;
-            font-size: 24px;
+            font-size: 16px;
             cursor: pointer;
-            padding: 4px 8px;
-            display: block;
+            padding: 8px 12px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            min-height: 44px;
+            min-width: 44px;
+            transition: background 0.2s;
+            -webkit-tap-highlight-color: transparent;
+            user-select: none;
         }
 
-        /* Collapsed sidebar state (keeps header and new-chat visible) */
-        #sidebar.collapsed {
-            width: 64px;
-        }
-
-        #sidebar.collapsed #chat-list,
-        #sidebar.collapsed .chat-item,
-        #sidebar.collapsed .chat-item-title,
-        #sidebar.collapsed .chat-item-preview,
-        #sidebar.collapsed .chat-item-time {
-            display: none;
-        }
-
-        #sidebar.collapsed #debug-panel {
-            display: none;
-        }
-
-        #sidebar.collapsed #sidebar-header {
-            justify-content: center;
-            gap: 0;
-        }
-
-        #sidebar.collapsed #sidebar-header span { display:none; }
-
-        #sidebar.collapsed #new-chat-btn {
-            padding: 6px 10px;
-            border-radius: 10px;
-            font-size: 13px;
+        #show-chats-btn:hover {
+            background: rgba(255,255,255,0.15);
         }
 
         #header-title {
@@ -306,19 +351,11 @@
 
         /* Mobile responsive */
         @media (max-width: 768px) {
-            #sidebar {
-                position: absolute;
-                height: 100%;
-                z-index: 1000;
-                box-shadow: 2px 0 8px rgba(0,0,0,0.1);
-            }
-
-            #toggle-sidebar {
-                display: block;
-                min-width: 44px; /* Better touch target */
-                min-height: 44px;
-            }
-
+            #chat-history-panel {
+                max-width: 95%;
+                max-height: 85vh;
+                margin-top: 40px;
+            }\n
             #chat-container {
                 padding: 12px;
                 padding-left: max(12px, env(safe-area-inset-left));
@@ -338,19 +375,18 @@
                 padding-left: max(16px, env(safe-area-inset-left));
                 padding-right: max(16px, env(safe-area-inset-right));
                 padding-top: max(16px, env(safe-area-inset-top));
+                flex-wrap: wrap;
+                font-size: 16px;
+            }
+
+            #header-title {
+                font-size: 16px;
             }
 
             /* Better touch targets for mobile */
             .chat-item {
-                min-height: 60px;
+                min-height: 70px;
                 padding: 16px;
-            }
-
-            #new-chat-btn {
-                min-height: 40px;
-                min-width: 44px;
-                -webkit-tap-highlight-color: transparent;
-                user-select: none;
             }
 
             button {
@@ -370,21 +406,22 @@
                 max-width: calc(100% - 32px);
             }
 
-            /* Hide sidebar by default on mobile */
-            #sidebar:not(.collapsed) {
-                transform: translateX(-100%);
+            #chat-history-overlay {
+                padding: 10px;
             }
 
-            /* Show sidebar when explicitly opened on mobile */
-            #sidebar.mobile-open {
-                transform: translateX(0) !important;
+            #model-selector-container {
+                order: 10;
+                width: 100%;
+                justify-content: center;
+                margin-top: 8px;
             }
         }
 
         /* Tablet landscape optimization */
         @media (min-width: 769px) and (max-width: 1024px) {
-            #sidebar {
-                width: 250px;
+            #chat-history-panel {
+                max-width: 500px;
             }
         }
 
@@ -401,6 +438,10 @@
             header {
                 padding: 12px;
                 font-size: 18px;
+            }
+
+            #chat-history-panel {
+                max-height: 90vh;
             }
         }
 
@@ -691,11 +732,12 @@
         </div>
     </div>
 
-    <div class="app-container">
-        <!-- Sidebar with chat history -->
-        <div id="sidebar">
-            <div id="sidebar-header">
-                <span>Chats</span>
+    <!-- Chat History Overlay Panel -->
+    <div id="chat-history-overlay">
+        <div id="chat-history-panel">
+            <div id="chat-history-header">
+                <span>Chat History</span>
+                <button id="close-chat-history" aria-label="Close chat history">×</button>
             </div>
             <div id="chat-list">
                 <!-- Chat items will appear here -->
@@ -714,11 +756,16 @@
                 <div id="debug-output" style="max-height:200px;overflow:auto;padding:8px 12px;font-size:13px;color:#333;white-space:pre-wrap"></div>
             </div>
         </div>
+    </div>
 
+    <div class="app-container">
         <!-- Main chat area -->
         <div id="main-content">
             <header>
-                <button id="toggle-sidebar" aria-label="Toggle sidebar" title="Collapse sidebar">◀</button>
+                <button id="show-chats-btn" aria-label="Show chat history" title="Chat History">
+                    <span>📋</span>
+                    <span>Chats</span>
+                </button>
                 <div id="header-title">
                     Alexi, the Alex chatbot
                     <span id="current-user-display"></span>
@@ -771,8 +818,9 @@
         const typingIndicator = document.getElementById('typing-indicator');
         const chatList = document.getElementById('chat-list');
         const newChatBtn = document.getElementById('new-chat-btn');
-        const toggleSidebarBtn = document.getElementById('toggle-sidebar');
-        const sidebar = document.getElementById('sidebar');
+        const showChatsBtn = document.getElementById('show-chats-btn');
+        const chatHistoryOverlay = document.getElementById('chat-history-overlay');
+        const closeChatHistoryBtn = document.getElementById('close-chat-history');
         const userModal = document.getElementById('user-modal');
         const userNameInput = document.getElementById('user-name-input');
         const currentUserDisplay = document.getElementById('current-user-display');
@@ -1062,6 +1110,9 @@
             // Update active state in sidebar
             renderChatList();
             
+            // Close chat history overlay
+            chatHistoryOverlay.classList.remove('active');
+            
             // Focus input
             messageInput.focus();
         }
@@ -1319,22 +1370,21 @@
 
     newChatBtn.addEventListener('click', endCurrentChatAndStartNew);
 
-        toggleSidebarBtn.addEventListener('click', () => {
-            // Toggle collapsed state instead of fully hiding sidebar
-            sidebar.classList.toggle('collapsed');
-            const collapsed = sidebar.classList.contains('collapsed');
-            toggleSidebarBtn.textContent = collapsed ? '▶' : '◀';
-            toggleSidebarBtn.title = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
+        // Chat History Overlay Controls
+        showChatsBtn.addEventListener('click', () => {
+            chatHistoryOverlay.classList.add('active');
         });
 
-        // Initialize chevron icon and tooltip based on current state
-        (function(){
-            try {
-                const collapsed = sidebar.classList.contains('collapsed');
-                toggleSidebarBtn.textContent = collapsed ? '▶' : '◀';
-                toggleSidebarBtn.title = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
-            } catch (e) { /* ignore */ }
-        })();
+        closeChatHistoryBtn.addEventListener('click', () => {
+            chatHistoryOverlay.classList.remove('active');
+        });
+
+        // Close overlay when clicking outside the panel
+        chatHistoryOverlay.addEventListener('click', (e) => {
+            if (e.target === chatHistoryOverlay) {
+                chatHistoryOverlay.classList.remove('active');
+            }
+        });
 
         // Initialize
         if (checkUser()) {
@@ -1391,32 +1441,6 @@
             deferredPrompt = null;
         });
 
-        // Handle mobile sidebar toggle properly
-        if (window.innerWidth <= 768) {
-            // Start with sidebar hidden on mobile
-            sidebar.classList.add('collapsed');
-            toggleSidebarBtn.textContent = '▶';
-            toggleSidebarBtn.title = 'Show chats';
-            
-            // Override toggle behavior for mobile
-            toggleSidebarBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                sidebar.classList.toggle('mobile-open');
-                const isOpen = sidebar.classList.contains('mobile-open');
-                toggleSidebarBtn.textContent = isOpen ? '◀' : '▶';
-                toggleSidebarBtn.title = isOpen ? 'Hide chats' : 'Show chats';
-            });
-            
-            // Close sidebar when clicking outside on mobile
-            document.getElementById('main-content').addEventListener('click', () => {
-                if (sidebar.classList.contains('mobile-open')) {
-                    sidebar.classList.remove('mobile-open');
-                    toggleSidebarBtn.textContent = '▶';
-                    toggleSidebarBtn.title = 'Show chats';
-                }
-            });
-        }
-
         // Prevent scroll when typing on mobile (keyboard covering input)
         if (/Android|iPhone|iPad|iPod/i.test(navigator.userAgent)) {
             messageInput.addEventListener('focus', () => {
@@ -1425,6 +1449,13 @@
                 }, 300);
             });
         }
+
+        // Close chat history when pressing Escape key
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && chatHistoryOverlay.classList.contains('active')) {
+                chatHistoryOverlay.classList.remove('active');
+            }
+        });
     </script>
 </body>
 </html>

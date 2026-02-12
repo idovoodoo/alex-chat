@@ -11,14 +11,12 @@
     {
       "src": "/static/images/alex-profile.webp",
       "sizes": "192x192",
-      "type": "image/webp",
-      "purpose": "any maskable"
+      "type": "image/webp"
     },
     {
       "src": "/static/images/alex-profile.webp",
       "sizes": "512x512",
-      "type": "image/webp",
-      "purpose": "any maskable"
+      "type": "image/webp"
     }
   ],
   "categories": ["productivity", "utilities"],
@@ -40,6 +38,7 @@
   "share_target": {
     "action": "/static/index.html",
     "method": "GET",
+    "enctype": "application/x-www-form-urlencoded",
     "params": {
       "title": "title",
       "text": "text"
