@@ -282,14 +282,40 @@ def _load_rag_assets():
                     if not cur.fetchone():
                         logging.info("Adding normalized_hash column to memories table...")
                         cur.execute("ALTER TABLE memories ADD COLUMN normalized_hash TEXT")
-                        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_type_hash ON memories(type, normalized_hash)")
                         DB_CONN.commit()
-                        logging.info("Migration complete: normalized_hash column and index added")
+                        logging.info("Migration complete: normalized_hash column added")
                     else:
                         logging.info("normalized_hash column already exists")
+
+                    # Attempt to create a UNIQUE index on (type, normalized_hash).
+                    # But first check for existing duplicate hashes which would prevent index creation.
+                    try:
+                        cur.execute("SELECT normalized_hash, COUNT(*) FROM memories WHERE normalized_hash IS NOT NULL GROUP BY normalized_hash HAVING COUNT(*) > 1")
+                        dup_rows = cur.fetchall()
+                        if dup_rows and len(dup_rows) > 0:
+                            # There are duplicates; do not attempt to create unique index.
+                            logging.warning("Cannot create unique index idx_memories_type_hash: duplicate normalized_hash values exist. Please deduplicate before adding a unique constraint.")
+                            logging.warning("Example SQL to find duplicates: SELECT normalized_hash, COUNT(*) FROM memories WHERE normalized_hash IS NOT NULL GROUP BY normalized_hash HAVING COUNT(*) > 1;")
+                        else:
+                            try:
+                                cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_type_hash ON memories(type, normalized_hash)")
+                                DB_CONN.commit()
+                                logging.info("Unique index idx_memories_type_hash created (or already exists)")
+                            except Exception as ie:
+                                logging.warning(f"Failed to create unique index idx_memories_type_hash: {type(ie).__name__}: {ie}")
+                                try:
+                                    DB_CONN.rollback()
+                                except Exception:
+                                    pass
+                    except Exception as e:
+                        logging.warning(f"Failed to check for duplicate normalized_hash values: {type(e).__name__}: {e}")
+                        try:
+                            DB_CONN.rollback()
+                        except Exception:
+                            pass
             except Exception as e:
                 logging.warning(f"Migration warning: {type(e).__name__}: {e}")
-                # Continue even if migration fails (column might already exist)
+                # Continue even if migration fails
                 try:
                     DB_CONN.rollback()
                 except Exception:
