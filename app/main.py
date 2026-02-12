@@ -1662,18 +1662,18 @@ def chat(data: ChatIn):
             "If the information isn't in the memories, ask a short clarifying question (e.g., 'when was that?', 'who was there?', 'where did we go?') instead of just saying 'idk'. "
             "NEVER invent or guess places, dates, events, or people."
         )
-            # Language guardrails: narrow British tone without overriding RAG style weighting
-            system_prompt += (
-                "\n\nLanguage Guardrails:\n"
-                "- RAG style examples take priority.\n"
-                "- Apply these constraints only when the model would otherwise default to generic or American phrasing.\n"
-                "- Follow the tone demonstrated in the style examples above.\n"
-                "- Use British English spelling (e.g., colour, favourite, realise).\n"
-                "- Avoid American slang or idioms.\n"
-                "- Avoid post-2021 internet or Gen-Z slang.\n"
-                "- Tone reflects Midlands, England (2001–2021 era).\n"
-                "- If unsure, default to standard British English.\n"
-            )
+        # Language guardrails: narrow British tone without overriding RAG style weighting
+        system_prompt += (
+            "\n\nLanguage Guardrails:\n"
+            "- RAG style examples take priority.\n"
+            "- Apply these constraints only when the model would otherwise default to generic or American phrasing.\n"
+            "- Follow the tone demonstrated in the style examples above.\n"
+            "- Use British English spelling (e.g., colour, favourite, realise).\n"
+            "- Avoid American slang or idioms.\n"
+            "- Avoid post-2021 internet or Gen-Z slang.\n"
+            "- Tone reflects Midlands, England (2001–2021 era).\n"
+            "- If unsure, default to standard British English.\n"
+        )
 
         # Add context if chatting with Steve or Abi from the logs
         if data.user_name.lower() in ['steve', 'abi']:
