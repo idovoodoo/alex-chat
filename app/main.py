@@ -143,6 +143,7 @@ NEW_CHAT_PROGRESS: dict = {}
 
 # In-memory conversation history per session
 CONVERSATION_HISTORY = {}
+USER_NAME_BY_SESSION = {}  # Track user_name for pronoun replacement in memories
 
 
 @app.on_event("startup")
@@ -886,7 +887,7 @@ def _search_life_memories(message: str, limit: int = 3) -> list[str]:
         return []
 
 
-def _summarize_conversation(session_history: list) -> str:
+def _summarize_conversation(session_history: list, user_name: str = "User") -> str:
     """Extract 0..N durable personal memories from conversation.
 
     Returns one short factual sentence per line (no bullets/numbering).
@@ -924,6 +925,11 @@ def _summarize_conversation(session_history: list) -> str:
         "- Do NOT output general knowledge, definitions, or explanations.\n"
         "- Do NOT restate or summarize AI answers.\n"
         "- If no valid personal/contextual memory exists, output exactly: NONE\n\n"
+        "CRITICAL - Use actual names, NOT pronouns:\n"
+        f"- The user's name is '{user_name}'. Replace 'I' with '{user_name}'.\n"
+        "- Replace 'we' with actual names (e.g., 'Alex and Abi' not 'we').\n"
+        "- Infer who 'we' refers to from context (Alex + user + anyone mentioned).\n"
+        "- Example: If user says 'we went to Legoland with Marilyn', write 'Alex went to Legoland with {user_name} and Marilyn'.\n\n"
         "Output format:\n"
         "- Return ONLY the sentences (or NONE).\n"
         "- One sentence per line. No numbering, no bullet points, no commentary, no quotes.\n\n"
@@ -1023,10 +1029,31 @@ def _summarize_conversation(session_history: list) -> str:
         if not cleaned:
             return ""
 
-        out = "\n".join(cleaned)
-        logging.info(f"_summarize_conversation: extracted {len(cleaned)} memory line(s)")
+        # Post-process: replace any remaining pronouns with actual names
+        final_cleaned: list[str] = []
+        for line in cleaned:
+            # Replace pronouns (case-insensitive, word boundaries)
+            line_fixed = line
+            # Replace "I" with user_name (careful with word boundaries)
+            line_fixed = re.sub(r"\bI\b", user_name, line_fixed)
+            line_fixed = re.sub(r"\bI'm\b", f"{user_name} is", line_fixed, flags=re.IGNORECASE)
+            line_fixed = re.sub(r"\bI've\b", f"{user_name} has", line_fixed, flags=re.IGNORECASE)
+            # Replace "we" with "Alex and {user_name}" if no other names visible in context
+            if re.search(r"\bwe\b", line_fixed, flags=re.IGNORECASE):
+                # Simple heuristic: if "Alex" is already in the sentence, just replace "we" with "they"
+                # otherwise replace with "Alex and {user_name}"
+                if "Alex" in line_fixed:
+                    line_fixed = re.sub(r"\bwe\b", "they", line_fixed, flags=re.IGNORECASE)
+                    line_fixed = re.sub(r"\bWe\b", "They", line_fixed)
+                else:
+                    line_fixed = re.sub(r"\bwe\b", f"Alex and {user_name}", line_fixed, flags=re.IGNORECASE)
+                    line_fixed = re.sub(r"\bWe\b", f"Alex and {user_name}", line_fixed)
+            final_cleaned.append(line_fixed)
+
+        out = "\n".join(final_cleaned)
+        logging.info(f"_summarize_conversation: extracted {len(final_cleaned)} memory line(s)")
         if isinstance(LAST_NEW_CHAT_DEBUG, dict):
-            LAST_NEW_CHAT_DEBUG["final_result"] = cleaned
+            LAST_NEW_CHAT_DEBUG["final_result"] = final_cleaned
         return out
     except Exception as e:
         logging.error(f"_summarize_conversation: error: {type(e).__name__}: {e}")
@@ -1540,6 +1567,8 @@ def chat(data: ChatIn):
         session_history.append({"role": "assistant", "content": reply})
         
         CONVERSATION_HISTORY[data.session_id] = session_history
+        # Track user_name for memory extraction
+        USER_NAME_BY_SESSION[data.session_id] = data.user_name
 
         # Aggregate totals
         total_input = sum(int(c.get("input_tokens", 0)) for c in token_calls)
@@ -1658,7 +1687,9 @@ def new_chat(data: NewChatIn):
             except Exception:
                 pass
 
-            summary = _summarize_conversation(session_history)
+            # Get user_name for pronoun replacement
+            user_name = USER_NAME_BY_SESSION.get(data.session_id, "User")
+            summary = _summarize_conversation(session_history, user_name=user_name)
             NEW_CHAT_PROGRESS[data.session_id]["progress"] = 30
             extracted_memory = summary
 
@@ -1738,6 +1769,9 @@ def new_chat(data: NewChatIn):
         # Clear the conversation history for this session
         if data.session_id in CONVERSATION_HISTORY:
             del CONVERSATION_HISTORY[data.session_id]
+        # Also clear user_name tracking
+        if data.session_id in USER_NAME_BY_SESSION:
+            del USER_NAME_BY_SESSION[data.session_id]
 
         # Optionally keep progress for a short time; we do not auto-delete here.
         LAST_NEW_CHAT_DEBUG["summary_saved"] = bool(summary_saved)
