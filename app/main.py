@@ -939,10 +939,11 @@ def _summarize_conversation(session_history: list) -> str:
         # GPT-5 models use thinking tokens internally, so we need high max_tokens
         # to ensure there's budget left for actual output after reasoning.
         # Note: GPT-5-mini only supports default temperature (1)
+        # Increased to 4096 to allow enough headroom for thinking + output
         summary, usage = _openai_chat_completion(
             model="gpt-5-mini",
             messages=[{"role": "user", "content": summary_prompt}],
-            max_tokens=1024,
+            max_tokens=4096,
         )
         
         # Track token usage
