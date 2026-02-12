@@ -1023,6 +1023,21 @@
             }
         }
 
+        // Fetch and log debug console output to browser console
+        async function fetchDebugConsole(tag = '') {
+            try {
+                const resp = await fetch('/debug/last_console');
+                const data = await resp.json();
+                if (data && Object.keys(data).length > 0) {
+                    console.group(`🔍 DEBUG CONSOLE ${tag ? `[${tag}]` : ''}`);
+                    console.log(data);
+                    console.groupEnd();
+                }
+            } catch (e) {
+                // Silently fail if debug console is unavailable
+            }
+        }
+
         // Save model when changed
         modelSelector.addEventListener('change', saveSelectedModel);
 
@@ -1241,6 +1256,9 @@
                                         } else {
                                             try { appLog('db', 'No DB summary found in state'); } catch (e) {}
                                         }
+                                        
+                                        // Fetch and log debug console output
+                                        await fetchDebugConsole('after-new-chat');
                                         
                                         setTimeout(() => {
                                             progressModal.classList.add('hidden');
@@ -1527,6 +1545,9 @@
 
                 const data = await response.json();
                 debugLog('sendMessage:response', data);
+                
+                // Fetch and log debug console output
+                await fetchDebugConsole('after-chat');
                 
                 // Hide typing indicator
                 showTyping(false);

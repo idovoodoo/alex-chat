@@ -28,9 +28,15 @@ from datetime import datetime
 import faiss
 import numpy as np
 import math
+import hashlib
+import unicodedata
 
 # Basic logging - configure before any logging calls
-logging.basicConfig(level=logging.INFO)
+# Only show WARNING and above in server logs (INFO goes to browser console via /debug/last_console)
+logging.basicConfig(level=logging.WARNING)
+
+# Suppress httpx INFO logs (HTTP requests to OpenAI)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # Determine repo root early for .env loading
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -117,6 +123,81 @@ def _openai_embedding(*, model: str, input_text: str):
     usage = resp.get("usage")
     return vec, usage
 
+
+def _normalize_memory_text(text: str) -> str:
+    """Normalize memory text for duplicate detection.
+    
+    Applies:
+    - Unicode normalization (NFKC)
+    - Lowercase
+    - Whitespace normalization
+    - Simple verb canonicalization
+    - Sorted person lists for consistent ordering
+    
+    Returns:
+        Normalized text string
+    """
+    if not text:
+        return ""
+    
+    # Unicode normalize (NFKC combines compatibility forms)
+    text = unicodedata.normalize("NFKC", text)
+    
+    # Lowercase
+    text = text.lower()
+    
+    # Normalize whitespace (collapse multiple spaces, strip)
+    text = " ".join(text.split())
+    
+    # Simple verb canonicalization (past/progressive to simple form)
+    # "used to live" -> "lived", "is living" -> "live", etc.
+    verb_replacements = {
+        r"\bused to live\b": "lived",
+        r"\bused to work\b": "worked",
+        r"\bis living\b": "live",
+        r"\bare living\b": "live",
+        r"\bwas living\b": "lived",
+        r"\bwere living\b": "lived",
+        r"\bis working\b": "work",
+        r"\bare working\b": "work",
+        r"\bwas working\b": "worked",
+        r"\bwere working\b": "worked",
+    }
+    
+    for pattern, replacement in verb_replacements.items():
+        text = re.sub(pattern, replacement, text)
+    
+    # Sort person names in "X and Y" patterns for consistency
+    # This handles "Steve and Alex" vs "Alex and Steve"
+    def sort_names(match):
+        parts = match.group(0).split(" and ")
+        if len(parts) == 2:
+            # Sort alphabetically
+            sorted_parts = sorted([p.strip() for p in parts])
+            return " and ".join(sorted_parts)
+        return match.group(0)
+    
+    # Match patterns like "Name and Name" (capitalized words)
+    text = re.sub(r'\b[A-Z][a-z]+ and [A-Z][a-z]+\b', sort_names, text, flags=0)
+    # Re-lowercase after name sorting
+    text = text.lower()
+    
+    return text
+
+
+def _compute_memory_hash(text: str) -> str:
+    """Compute SHA256 hash of normalized memory text.
+    
+    Args:
+        text: Memory text (will be normalized before hashing)
+    
+    Returns:
+        Hex digest of SHA256 hash
+    """
+    normalized = _normalize_memory_text(text)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
 # Configure Gemini API
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
@@ -188,6 +269,32 @@ def _load_rag_assets():
 
             DB_CONN = psycopg2.connect(db_url, connect_timeout=10)
             logging.info("Database connection successful")
+            
+            # Run database migrations (add normalized_hash column if missing)
+            try:
+                with DB_CONN.cursor() as cur:
+                    # Check if normalized_hash column exists
+                    cur.execute("""
+                        SELECT column_name 
+                        FROM information_schema.columns 
+                        WHERE table_name='memories' AND column_name='normalized_hash'
+                    """)
+                    if not cur.fetchone():
+                        logging.info("Adding normalized_hash column to memories table...")
+                        cur.execute("ALTER TABLE memories ADD COLUMN normalized_hash VARCHAR(64)")
+                        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_type_hash ON memories(type, normalized_hash)")
+                        DB_CONN.commit()
+                        logging.info("Migration complete: normalized_hash column and index added")
+                    else:
+                        logging.info("normalized_hash column already exists")
+            except Exception as e:
+                logging.warning(f"Migration warning: {type(e).__name__}: {e}")
+                # Continue even if migration fails (column might already exist)
+                try:
+                    DB_CONN.rollback()
+                except Exception:
+                    pass
+            
             # Load core memories from unified memories table
             with DB_CONN.cursor() as cur:
                 cur.execute("SELECT content FROM memories WHERE type = 'core' ORDER BY id")
@@ -1238,7 +1345,7 @@ def _get_tags_for_candidates(candidate_lines: list[str]) -> dict:
 
 
 def _check_duplicate_memory(new_memory: str, threshold: float = 0.85, check_life_memories: bool = True) -> bool:
-    """Check if a memory is a duplicate using cosine similarity (pre-computed embeddings).
+    """Check if a memory is a duplicate using normalized hash first, then cosine similarity.
     
     Args:
         new_memory: The memory text to check
@@ -1246,11 +1353,30 @@ def _check_duplicate_memory(new_memory: str, threshold: float = 0.85, check_life
         check_life_memories: If True, check against life memories; if False, check against MEMORIES
     
     Returns:
-        True if duplicate found (similarity > threshold), False otherwise
+        True if duplicate found (hash match or similarity > threshold), False otherwise
     """
     if not new_memory or not new_memory.strip():
         return True  # Empty memory is considered duplicate
     
+    # STEP 1: Check for exact normalized hash match in database (fast, deterministic)
+    if check_life_memories:
+        try:
+            new_hash = _compute_memory_hash(new_memory)
+            if _ensure_db_connection():
+                with DB_CONN.cursor() as cur:
+                    cur.execute(
+                        "SELECT COUNT(*) FROM memories WHERE type = 'life' AND normalized_hash = %s",
+                        (new_hash,)
+                    )
+                    count = cur.fetchone()[0]
+                    if count > 0:
+                        logging.info(f"Duplicate life memory detected (exact normalized hash match)")
+                        return True
+        except Exception as e:
+            logging.warning(f"Hash duplicate check failed: {type(e).__name__}: {e}")
+            # Continue to embedding check on error
+    
+    # STEP 2: Check for paraphrase duplicates using embeddings    
     if check_life_memories:
         # Use pre-computed life memory embeddings (90%+ token reduction)
         if LIFE_MEMORY_EMBEDDINGS is None or LIFE_MEMORY_TEXTS is None or len(LIFE_MEMORY_TEXTS) == 0:
@@ -1343,7 +1469,7 @@ def _save_memory(memory_line: str):
         pass
 
 
-def _save_life_memory(memory_line: str, tags: list[str] | None = None):
+def _save_life_memory(memory_line: str):
     """Append a memory line to Supabase memories table with type='life'.
     
     Args:
@@ -1365,29 +1491,16 @@ def _save_life_memory(memory_line: str, tags: list[str] | None = None):
                 LAST_NEW_CHAT_DEBUG["db_connection"] = "established"
                 LAST_NEW_CHAT_DEBUG["memories_to_insert"] = new_memories
 
-            # Normalize tags parameter: either None or list matching new_memories length
-            tags_list = None
-            if tags and isinstance(tags, list):
-                # If tags is a flat list of tag strings for a single memory, convert to per-memory list
-                if len(new_memories) == 1 and all(isinstance(t, str) for t in tags):
-                    tags_list = [tags]
-                elif len(tags) == len(new_memories):
-                    tags_list = tags
-                else:
-                    # provided tags don't match length; ignore
-                    tags_list = None
-
-            # Insert each memory into the database; include tags when available
+            # Insert each memory into the database with normalized_hash
             with DB_CONN.cursor() as cur:
-                for idx, mem in enumerate(new_memories):
-                    logging.info(f"Executing INSERT for life memory: '{mem}'")
-                    if tags_list and idx < len(tags_list) and tags_list[idx]:
-                        cur.execute(
-                            "INSERT INTO memories (content, type, tags) VALUES (%s, %s, %s)",
-                            (mem, 'life', tags_list[idx])
-                        )
-                    else:
-                        cur.execute("INSERT INTO memories (content, type) VALUES (%s, %s)", (mem, 'life'))
+                for mem in new_memories:
+                    mem_hash = _compute_memory_hash(mem)
+                    logging.info(f"Executing INSERT for life memory: '{mem}' (hash: {mem_hash[:16]}...)")
+                    # Use ON CONFLICT DO NOTHING to prevent race-condition duplicates
+                    cur.execute(
+                        "INSERT INTO memories (content, type, normalized_hash) VALUES (%s, %s, %s) ON CONFLICT (type, normalized_hash) DO NOTHING",
+                        (mem, 'life', mem_hash)
+                    )
             DB_CONN.commit()
             logging.info(f"Saved {len(new_memories)} life memories to database (committed)")
 
@@ -1963,6 +2076,24 @@ def new_chat(data: NewChatIn):
             if summary:
                 # Split into separate DB entries (one per line) and apply duplicate check per entry.
                 candidate_lines = [ln.strip() for ln in str(summary).split("\n") if ln.strip()]
+                
+                # Deduplicate candidate_lines using normalized text (prevent duplicates within same summary)
+                seen_hashes = set()
+                deduped_lines = []
+                for ln in candidate_lines:
+                    ln_hash = _compute_memory_hash(ln)
+                    if ln_hash not in seen_hashes:
+                        seen_hashes.add(ln_hash)
+                        deduped_lines.append(ln)
+                
+                original_count = len(candidate_lines)
+                candidate_lines = deduped_lines
+                
+                if original_count > len(candidate_lines):
+                    logging.info(f"Deduped candidate_lines: {original_count} -> {len(candidate_lines)}")
+                    if isinstance(LAST_NEW_CHAT_DEBUG, dict):
+                        LAST_NEW_CHAT_DEBUG["deduped_count"] = original_count - len(candidate_lines)
+                
                 NEW_CHAT_PROGRESS[data.session_id]["status"] = "checking_duplicates"
                 NEW_CHAT_PROGRESS[data.session_id]["progress"] = 40
                 NEW_CHAT_PROGRESS[data.session_id]["message"] = f"{len(candidate_lines)} candidate(s) to check"
@@ -2009,14 +2140,8 @@ def new_chat(data: NewChatIn):
                         "clarification_questions": clarification_questions,
                     }
 
-                # Get tags for each candidate memory (1-3 short tags per memory)
+                # Do not request or attach tags anymore; skip tag extraction
                 tags_map = {}
-                try:
-                    tags_map = _get_tags_for_candidates(candidate_lines)
-                except Exception:
-                    tags_map = {}
-                if isinstance(LAST_NEW_CHAT_DEBUG, dict):
-                    LAST_NEW_CHAT_DEBUG["tags_map"] = tags_map
 
                 saved_lines: list[str] = []
                 skipped_duplicates: list[str] = []
@@ -2041,9 +2166,8 @@ def new_chat(data: NewChatIn):
                         continue
 
                     try:
-                        # Pass tags for this line if available
-                        tags_for_line = tags_map.get(line) if isinstance(tags_map, dict) else None
-                        _save_life_memory(line, tags=tags_for_line)
+                        # Do not pass tags when saving life memories
+                        _save_life_memory(line)
                         saved_lines.append(line)
                         summary_saved = True
                         # update progress

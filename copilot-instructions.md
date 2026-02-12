@@ -5,6 +5,23 @@
 This file tells the coding assistant how to behave when working in this repository.
 
 ---
+## ESSENTIAL
+All debug messages should be sent to the web browser console for viewing. Never the server console.
+
+### Debug logging rules (MANDATORY)
+
+- Server logs: only warnings and errors must be emitted to the server terminal/logs. Do not use server-level INFO for debug diagnostics.
+- Browser console: ALL debug output belongs in the browser DevTools Console and must be delivered via the in-memory debug payload and `/debug/last_console` endpoint.
+- How to emit debug from server code:
+  - Build a compact debug payload (JSON) containing the relevant runtime diagnostics (e.g., `LAST_NEW_CHAT_DEBUG`, `LIFE_RECALL_DEBUG`, token summaries, db_summary).
+  - Call `_log_debug_to_console(tag)` (or replicate its pattern) to serialize this payload to the global `LAST_DEBUG_CONSOLE` string.
+  - Do NOT `logging.info()` or `print()` debug payloads — that writes to the server console which is forbidden for debug output.
+- Database / migration messages and unexpected conditions may log warnings/errors with `logging.warning()` / `logging.error()` as appropriate; these are allowed server-side.
+- How the frontend must display debug:
+  - The client should periodically (or after key actions) fetch `/debug/last_console` and `console.log()` or `console.group()` the returned JSON so developers see full debug state in DevTools.
+  - Example client pattern: after `/chat` or `/new_chat` completes, call fetch `/debug/last_console` and `console.group('DEBUG')` / `console.log(json)` / `console.groupEnd()`.
+
+These rules ensure all runtime debugging is visible in the browser console and the server console remains noise-free in production.
 
 ## Architecture Overview
 
