@@ -1,0 +1,48 @@
+{
+  "name": "Alex Chat - AI Assistant",
+  "short_name": "Alex Chat",
+  "description": "Chat with Alex, your personal AI assistant",
+  "start_url": "/static/index.html",
+  "display": "standalone",
+  "background_color": "#f5f5f5",
+  "theme_color": "#075e54",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/static/images/alex-profile.webp",
+      "sizes": "192x192",
+      "type": "image/webp",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/static/images/alex-profile.webp",
+      "sizes": "512x512",
+      "type": "image/webp",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["productivity", "utilities"],
+  "shortcuts": [
+    {
+      "name": "New Chat",
+      "short_name": "New",
+      "description": "Start a new chat conversation",
+      "url": "/static/index.html?action=new",
+      "icons": [
+        {
+          "src": "/static/images/alex-profile.webp",
+          "sizes": "192x192"
+        }
+      ]
+    }
+  ],
+  "screenshots": [],
+  "share_target": {
+    "action": "/static/index.html",
+    "method": "GET",
+    "params": {
+      "title": "title",
+      "text": "text"
+    }
+  }
+}

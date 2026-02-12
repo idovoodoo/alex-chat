@@ -920,11 +920,17 @@ def _summarize_conversation(session_history: list, user_name: str = "User") -> s
         "Rules:\n"
         "- Output 1 to 5 short factual sentences, EACH on its own line.\n"
         "- Each sentence must be about the user, Alex, or someone in their lives.\n"
-        "- Each sentence must describe a personal habit, preference, situation, plan, or experience.\n"
+        "- Each sentence must describe a DURABLE fact: preferences, traits, past experiences, future plans with dates, relationships, or ongoing situations.\n"
         "- Use only information stated by the USER. Ignore anything said by Alex/assistant.\n"
         "- Do NOT output general knowledge, definitions, or explanations.\n"
         "- Do NOT restate or summarize AI answers.\n"
         "- If no valid personal/contextual memory exists, output exactly: NONE\n\n"
+        "CRITICAL - EXCLUDE IMMEDIATE/TRANSIENT ACTIVITIES:\n"
+        "- Do NOT capture what someone is doing RIGHT NOW (e.g., 'Steve is going to the shops', 'Abi is playing TF2').\n"
+        "- Do NOT capture temporary states, current locations, or immediate plans without specific dates.\n"
+        "- ONLY capture: preferences (likes/dislikes), past events, future plans with dates/context, habits, relationships, or ongoing situations.\n"
+        "- Examples to EXCLUDE: 'X is playing Y', 'X is at the store', 'X is doing homework'.\n"
+        "- Examples to INCLUDE: 'Steve loves playing football', 'Alex went skiing in France in 2025', 'Abi is planning to visit Japan in March'.\n\n"
         "CRITICAL - Use actual names, NOT pronouns:\n"
         f"- The user's name is '{user_name}'. Replace 'I' with '{user_name}'.\n"
         "- Replace 'we' with actual names (e.g., 'Alex and Abi' not 'we').\n"
@@ -990,6 +996,7 @@ def _summarize_conversation(session_history: list, user_name: str = "User") -> s
             return ""
 
         bad_phrases = (
+            # General knowledge / definitions
             " is defined as ",
             " refers to ",
             " means ",
@@ -997,6 +1004,25 @@ def _summarize_conversation(session_history: list, user_name: str = "User") -> s
             " generally ",
             " as an ai ",
             " i am an ai ",
+            # Immediate/transient activities (present continuous)
+            " is going to ",
+            " is playing ",
+            " is at the ",
+            " is at ",
+            " is doing ",
+            " is watching ",
+            " is eating ",
+            " is drinking ",
+            " is buying ",
+            " is working on ",
+            " is reading ",
+            " is listening to ",
+            " are going to ",
+            " are playing ",
+            " are at the ",
+            " are at ",
+            " are doing ",
+            " are watching ",
         )
 
         cleaned: list[str] = []
