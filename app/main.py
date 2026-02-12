@@ -1973,7 +1973,7 @@ def new_chat(data: NewChatIn):
         LAST_NEW_CHAT_DEBUG["summary_saved"] = bool(summary_saved)
         LAST_NEW_CHAT_DEBUG["duplicate_detected"] = bool(duplicate_detected)
         # Before clearing session history, if we have token logs for this session,
-        # compute totals and print them to the server console for inspection.
+        # compute totals and write them to the server console (as requested).
         try:
             toklog = SESSION_TOKEN_LOGS.get(data.session_id)
             if isinstance(toklog, list) and toklog:
@@ -1988,16 +1988,18 @@ def new_chat(data: NewChatIn):
                 total_out = sum(int(c.get('output_tokens', 0)) for c in flat_calls)
                 total_sum = sum(int(c.get('total_tokens', 0)) for c in flat_calls)
 
+                payload = {
+                    'session_id': data.session_id,
+                    'entries': len(toklog),
+                    'calls_total': len(flat_calls),
+                    'input_tokens': int(total_in),
+                    'output_tokens': int(total_out),
+                    'total_tokens': int(total_sum),
+                    'per_call': flat_calls,
+                }
+
+                # Log the token summary to the server console (Render logs)
                 try:
-                    payload = {
-                        'session_id': data.session_id,
-                        'entries': len(toklog),
-                        'calls_total': len(flat_calls),
-                        'input_tokens': int(total_in),
-                        'output_tokens': int(total_out),
-                        'total_tokens': int(total_sum),
-                        'per_call': flat_calls,
-                    }
                     logging.info(f"Session token summary: {json.dumps(payload, default=str, ensure_ascii=False)}")
                 except Exception:
                     logging.info(f"Session token summary (session={data.session_id}): in={total_in} out={total_out} total={total_sum}")
