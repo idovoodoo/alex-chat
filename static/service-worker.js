@@ -6,15 +6,15 @@ const urlsToCache = [
 
 // Install event - cache essential resources
 self.addEventListener('install', (event) => {
-  console.log('[ServiceWorker] Install');
+  // console.log('[ServiceWorker] Install');
   event.waitUntil(
     caches.open(CACHE_NAME)
       .then((cache) => {
-        console.log('[ServiceWorker] Caching app shell');
+        // console.log('[ServiceWorker] Caching app shell');
         return cache.addAll(urlsToCache);
       })
-      .catch((err) => {
-        console.error('[ServiceWorker] Cache failed:', err);
+        .catch((err) => {
+        // console.error('[ServiceWorker] Cache failed:', err);
       })
   );
   self.skipWaiting();
@@ -22,13 +22,13 @@ self.addEventListener('install', (event) => {
 
 // Activate event - clean up old caches
 self.addEventListener('activate', (event) => {
-  console.log('[ServiceWorker] Activate');
+  // console.log('[ServiceWorker] Activate');
   event.waitUntil(
     caches.keys().then((cacheNames) => {
       return Promise.all(
         cacheNames.map((cacheName) => {
-          if (cacheName !== CACHE_NAME) {
-            console.log('[ServiceWorker] Removing old cache:', cacheName);
+            if (cacheName !== CACHE_NAME) {
+            // console.log('[ServiceWorker] Removing old cache:', cacheName);
             return caches.delete(cacheName);
           }
         })
@@ -89,8 +89,8 @@ self.addEventListener('fetch', (event) => {
 
             return response;
           })
-          .catch((err) => {
-            console.error('[ServiceWorker] Fetch failed:', err);
+            .catch((err) => {
+            // console.error('[ServiceWorker] Fetch failed:', err);
             // Return offline page or fallback
             return new Response('Offline - content not available', {
               status: 503,
@@ -103,8 +103,8 @@ self.addEventListener('fetch', (event) => {
 
 // Handle background sync for offline messages (future enhancement)
 self.addEventListener('sync', (event) => {
-  if (event.tag === 'sync-messages') {
-    console.log('[ServiceWorker] Background sync');
+    if (event.tag === 'sync-messages') {
+    // console.log('[ServiceWorker] Background sync');
     event.waitUntil(
       // Could sync offline messages here
       Promise.resolve()
@@ -114,7 +114,7 @@ self.addEventListener('sync', (event) => {
 
 // Handle push notifications (future enhancement)
 self.addEventListener('push', (event) => {
-  console.log('[ServiceWorker] Push received');
+  // console.log('[ServiceWorker] Push received');
   const data = event.data ? event.data.json() : {};
   
   const options = {
@@ -134,7 +134,7 @@ self.addEventListener('push', (event) => {
 
 // Handle notification clicks
 self.addEventListener('notificationclick', (event) => {
-  console.log('[ServiceWorker] Notification clicked');
+  // console.log('[ServiceWorker] Notification clicked');
   event.notification.close();
 
   event.waitUntil(

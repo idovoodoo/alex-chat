@@ -950,7 +950,7 @@
         const settingsCloseBtn = document.getElementById('settings-close-btn');
         const tokenUsageEl = document.getElementById('token-usage');
         const dbStatusEl = document.getElementById('db-status');
-        // Console debug toggle and wrapper
+        // Limited client-side logger: only 'api', 'db', and 'token' messages are shown
         const consoleToggleEl = document.getElementById('enable-console-logs');
         function isConsoleEnabled() {
             try { return localStorage.getItem('alex_console_logs') === '1'; } catch (e) { return true; }
@@ -959,8 +959,13 @@
             try { localStorage.setItem('alex_console_logs', v ? '1' : '0'); } catch (e) {}
             if (consoleToggleEl) consoleToggleEl.checked = !!v;
         }
+        function appLog(kind, label, ...args) {
+            if (!['api', 'db', 'token'].includes(kind)) return;
+            try { console.log('[' + kind.toUpperCase() + ']' + (label ? ' ' + label : ''), ...args); } catch (e) {}
+        }
         function debugLog(...args) {
-            if (isConsoleEnabled()) console.log('[DEBUG]', ...args);
+            // suppressed to reduce web console noise
+            // if (isConsoleEnabled()) console.log('[DEBUG]', ...args);
         }
         // enable console logs by default and initialize checkbox state (if present)
         try { if (localStorage.getItem('alex_console_logs') === null) setConsoleEnabled(true); } catch (e) { setConsoleEnabled(true); }
@@ -979,10 +984,12 @@
         // Model management
         function saveSelectedModel() {
             localStorage.setItem('alex_selected_model', modelSelector.value);
+            try { appLog('db', 'set alex_selected_model', modelSelector.value); } catch (e) {}
         }
 
         function loadSelectedModel() {
             const savedModel = localStorage.getItem('alex_selected_model');
+            try { appLog('db', 'get alex_selected_model', savedModel); } catch (e) {}
             if (savedModel) {
                 modelSelector.value = savedModel;
             }
@@ -995,6 +1002,7 @@
         async function checkDbStatus() {
             if (!dbStatusEl) return;
             try {
+                appLog('api', 'GET /db_status');
                 const resp = await fetch('/db_status');
                 const j = await resp.json();
                 debugLog('checkDbStatus:resp', j);
@@ -1031,7 +1039,7 @@
                 try {
                     saveSelectedModel();
                 } catch (e) {
-                    console.error('Failed to save settings:', e);
+                    // console.error('Failed to save settings:', e);
                 }
                 settingsPanel.classList.add('hidden');
             });
@@ -1083,6 +1091,7 @@
             }
             currentUser = name;
             localStorage.setItem('alex_current_user', currentUser);
+            try { appLog('db', 'set alex_current_user', currentUser); } catch (e) {}
             userModal.classList.add('hidden');
             currentUserDisplay.textContent = currentUser;
             if (changeUserBtn) changeUserBtn.disabled = false;
@@ -1114,6 +1123,7 @@
             if (!currentUser) return;
             
             const savedChats = localStorage.getItem(`alex_chats_${currentUser}`);
+            try { appLog('db', `get alex_chats_${currentUser}`, !!savedChats); } catch (e) {}
             if (savedChats) {
                 chats = JSON.parse(savedChats);
             } else {
@@ -1136,6 +1146,7 @@
         function saveChats() {
             if (!currentUser) return;
             localStorage.setItem(`alex_chats_${currentUser}`, JSON.stringify(chats));
+            try { appLog('db', `set alex_chats_${currentUser}`, { count: Object.keys(chats).length }); } catch (e) {}
         }
 
         // Create a new chat locally (no server call)
@@ -1178,12 +1189,13 @@
                         progressText.textContent = 'Starting...';
                         
                         // Initiate the new_chat request (non-blocking)
+                        appLog('api', 'POST /new_chat', { sessionId });
                         fetch('/new_chat', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ session_id: sessionId })
                         }).catch(e => {
-                            console.error('new_chat error:', e);
+                            // console.error('new_chat error:', e);
                         });
                         
                         // Poll progress
@@ -1201,6 +1213,7 @@
                             }
                             
                             try {
+                                appLog('api', `GET /new_chat_progress/${sessionId}`);
                                 const res = await fetch(`/new_chat_progress/${sessionId}`);
                                 const data = await res.json();
                                 
@@ -1212,25 +1225,13 @@
                                     if (state.status === 'done' || state.status === 'error') {
                                         clearInterval(pollInterval);
                                         
-                                        // Debug: Log the entire state object
-                                        console.log('[TOKEN_DEBUG] New chat completed. Full state:', state);
-                                        console.log('[TOKEN_DEBUG] token_summary exists?', 'token_summary' in state);
-                                        console.log('[TOKEN_DEBUG] token_summary value:', state.token_summary);
-                                        
-                                        // Display token summary if available
+                                        // Report final token summary (minimal)
+                                        appLog('token', 'New chat completed. Full state:', state);
                                         if (state.token_summary) {
                                             const ts = state.token_summary;
-                                            console.log('====================================');
-                                            console.log('=== CHAT SESSION TOKEN SUMMARY ===');
-                                            console.log('====================================');
-                                            console.log(`Total Tokens: ${ts.total_tokens}`);
-                                            console.log(`  Input:  ${ts.input_tokens}`);
-                                            console.log(`  Output: ${ts.output_tokens}`);
-                                            console.log(`API Calls: ${ts.calls_total}`);
-                                            console.log('Full details:', ts);
-                                            console.log('====================================');
+                                            appLog('token', '=== CHAT SESSION TOKEN SUMMARY ===', ts);
                                         } else {
-                                            console.log('[TOKEN_DEBUG] No token summary found in state');
+                                            appLog('token', 'No token summary found in state');
                                         }
                                         
                                         setTimeout(() => {
@@ -1244,7 +1245,7 @@
                                     // Progress not found yet, keep polling
                                 }
                             } catch (e) {
-                                console.error('Progress poll error:', e);
+                                // console.error('Progress poll error:', e);
                             }
                         }, 500);
                         
@@ -1252,7 +1253,7 @@
                     }
                 }
             } catch (e) {
-                console.error('endCurrentChatAndStartNew error:', e);
+                // console.error('endCurrentChatAndStartNew error:', e);
                 progressModal.classList.add('hidden');
             }
             
@@ -1361,11 +1362,10 @@
             const container = document.getElementById('debug-output');
             if (!container) return;
             container.textContent = 'Loading debug info...';
-            debugLog('fetchDebugInfo:start');
             try {
+                appLog('api', 'GET /debug/db');
                 const res = await fetch('/debug/db');
                 const data = await res.json();
-                debugLog('fetchDebugInfo:result', data);
                 container.innerHTML = '';
                 // Pretty print key / value pairs
                 for (const [k, v] of Object.entries(data)) {
@@ -1375,7 +1375,6 @@
                     container.appendChild(row);
                 }
             } catch (err) {
-                debugLog('fetchDebugInfo:error', err);
                 container.textContent = 'Error loading debug info: ' + (err.message || err);
             }
         }
@@ -1504,6 +1503,7 @@
 
             try {
                 const chat = chats[currentChatId];
+                appLog('api', 'POST /chat', { sessionId: chat.sessionId });
                 const response = await fetch('/chat', {
                     method: 'POST',
                     headers: {
@@ -1609,23 +1609,23 @@
             window.addEventListener('load', () => {
                 navigator.serviceWorker.register('/static/service-worker.js')
                     .then((registration) => {
-                        console.log('[PWA] ServiceWorker registered:', registration.scope);
+                        // console.log('[PWA] ServiceWorker registered:', registration.scope);
                         
                         // Check for updates
                         registration.addEventListener('updatefound', () => {
                             const newWorker = registration.installing;
-                            console.log('[PWA] New service worker found, installing...');
+                            // console.log('[PWA] New service worker found, installing...');
                             
                             newWorker.addEventListener('statechange', () => {
                                 if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
-                                    console.log('[PWA] New version available! Reload to update.');
+                                    // console.log('[PWA] New version available! Reload to update.');
                                     // Optional: show update notification to user
                                 }
                             });
                         });
                     })
                     .catch((err) => {
-                        console.log('[PWA] ServiceWorker registration failed:', err);
+                        // console.log('[PWA] ServiceWorker registration failed:', err);
                     });
             });
         }
@@ -1633,7 +1633,7 @@
         // PWA Install Prompt (A2HS - Add to Home Screen)
         let deferredPrompt;
         window.addEventListener('beforeinstallprompt', (e) => {
-            console.log('[PWA] Install prompt available');
+            // console.log('[PWA] Install prompt available');
             e.preventDefault();
             deferredPrompt = e;
             
@@ -1642,7 +1642,7 @@
         });
 
         window.addEventListener('appinstalled', () => {
-            console.log('[PWA] App installed successfully');
+            // console.log('[PWA] App installed successfully');
             deferredPrompt = null;
         });
 
