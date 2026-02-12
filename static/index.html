@@ -290,11 +290,13 @@
             background: rgba(255,255,255,0.06);
         }
         #alex-avatar {
-            width: 64px;
-            height: 64px;
+            width: 40px;
+            height: 40px;
             border-radius: 50%;
             object-fit: cover;
             border: 2px solid rgba(255,255,255,0.12);
+            display: block;
+            margin: 0;
         }
 
         #chat-container {
@@ -308,6 +310,24 @@
             -webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS */
             overscroll-behavior: contain; /* Prevent pull-to-refresh on chat */
         }
+
+        /* Snackbar shown when chat gets too long */
+        #snackbar {
+            position: absolute;
+            left: 50%;
+            transform: translateX(-50%);
+            top: 10px;
+            background: rgba(0,0,0,0.85);
+            color: white;
+            padding: 10px 16px;
+            border-radius: 8px;
+            z-index: 4000;
+            display: none;
+            box-shadow: 0 6px 20px rgba(0,0,0,0.2);
+            font-weight: 600;
+            font-size: 14px;
+        }
+        #snackbar.show { display: block; animation: slideDown 0.25s ease; }
 
         .message {
             max-width: 75%;
@@ -801,7 +821,6 @@
                 <div class="header-left">
                     <div class="avatar-stack">
                         <img id="alex-avatar" src="/static/images/alex-profile.webp" alt="Alex profile photo" width="40" height="40" />
-                        <button id="show-chats-btn" class="app-btn icon-btn" aria-label="Show chat history" title="Chat History">📋</button>
                     </div>
                     <div class="brand">
                         <div class="header-main-title">Alexi, an Alex Chatbot</div>
@@ -815,6 +834,7 @@
                 </div>
 
                 <div class="header-right">
+                    <button id="show-chats-btn" class="app-btn icon-btn" aria-label="Show chat history" title="Chat History">📋</button>
                     <button id="settings-btn" class="app-btn icon-btn" title="Settings" aria-label="Settings">⚙️</button>
                 </div>
                     <div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px;">
@@ -849,6 +869,9 @@
             <div id="chat-container">
                 <!-- Messages will appear here -->
             </div>
+
+            <!-- Snackbar warning for long chats -->
+            <div id="snackbar">Chat is too long, start a new one</div>
 
             <div class="typing-indicator" id="typing-indicator">
                 <span></span>
@@ -1355,6 +1378,30 @@
             
             saveChats();
             renderChatList();
+
+            // If chat length grows too long, show snackbar suggestion
+            try {
+                const totalMessages = Array.isArray(chat.messages) ? chat.messages.length : 0;
+                if (totalMessages >= 20) {
+                    showSnackbar('Chat is too long, start a new one');
+                }
+            } catch (e) {
+                debugLog('snackbar check failed', e);
+            }
+        }
+
+        // Snackbar helper
+        let _snackTimer = null;
+        function showSnackbar(msg, duration = 6000) {
+            const el = document.getElementById('snackbar');
+            if (!el) return;
+            el.textContent = msg;
+            el.classList.add('show');
+            if (_snackTimer) clearTimeout(_snackTimer);
+            _snackTimer = setTimeout(() => {
+                el.classList.remove('show');
+                _snackTimer = null;
+            }, duration);
         }
 
         function showTyping(show) {

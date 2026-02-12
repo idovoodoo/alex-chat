@@ -144,6 +144,8 @@ NEW_CHAT_PROGRESS: dict = {}
 # In-memory conversation history per session
 CONVERSATION_HISTORY = {}
 USER_NAME_BY_SESSION = {}  # Track user_name for pronoun replacement in memories
+# Per-session token logs (temporary runtime-only, cleared after /new_chat)
+SESSION_TOKEN_LOGS: dict = {}
 
 
 @app.on_event("startup")
@@ -1698,6 +1700,20 @@ def chat(data: ChatIn):
         # Track user_name for memory extraction
         USER_NAME_BY_SESSION[data.session_id] = data.user_name
 
+        # Record token calls for this session (keep runtime-only log per session)
+        try:
+            lst = SESSION_TOKEN_LOGS.get(data.session_id)
+            if not isinstance(lst, list):
+                lst = []
+                SESSION_TOKEN_LOGS[data.session_id] = lst
+            # store a lightweight snapshot: timestamp and calls
+            lst.append({
+                "time": datetime.utcnow().isoformat(),
+                "calls": token_calls,
+            })
+        except Exception:
+            pass
+
         # Aggregate totals
         total_input = sum(int(c.get("input_tokens", 0)) for c in token_calls)
         total_output = sum(int(c.get("output_tokens", 0)) for c in token_calls)
@@ -1956,7 +1972,44 @@ def new_chat(data: NewChatIn):
         # Optionally keep progress for a short time; we do not auto-delete here.
         LAST_NEW_CHAT_DEBUG["summary_saved"] = bool(summary_saved)
         LAST_NEW_CHAT_DEBUG["duplicate_detected"] = bool(duplicate_detected)
-        
+        # Before clearing session history, if we have token logs for this session,
+        # compute totals and print them to the server console for inspection.
+        try:
+            toklog = SESSION_TOKEN_LOGS.get(data.session_id)
+            if isinstance(toklog, list) and toklog:
+                # Flatten all calls across the session
+                flat_calls = []
+                for entry in toklog:
+                    calls = entry.get('calls') or []
+                    for c in calls:
+                        flat_calls.append(c)
+
+                total_in = sum(int(c.get('input_tokens', 0)) for c in flat_calls)
+                total_out = sum(int(c.get('output_tokens', 0)) for c in flat_calls)
+                total_sum = sum(int(c.get('total_tokens', 0)) for c in flat_calls)
+
+                try:
+                    payload = {
+                        'session_id': data.session_id,
+                        'entries': len(toklog),
+                        'calls_total': len(flat_calls),
+                        'input_tokens': int(total_in),
+                        'output_tokens': int(total_out),
+                        'total_tokens': int(total_sum),
+                        'per_call': flat_calls,
+                    }
+                    logging.info(f"Session token summary: {json.dumps(payload, default=str, ensure_ascii=False)}")
+                except Exception:
+                    logging.info(f"Session token summary (session={data.session_id}): in={total_in} out={total_out} total={total_sum}")
+
+                # clear the runtime token log for this session now we've reported it
+                try:
+                    del SESSION_TOKEN_LOGS[data.session_id]
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         return {
             "status": "ok",
             "message": "New chat started",
