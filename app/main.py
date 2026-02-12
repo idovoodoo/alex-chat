@@ -2007,8 +2007,16 @@ def new_chat(data: NewChatIn):
                 
                 # Add token_summary to progress state so frontend can display it
                 try:
-                    if data.session_id in NEW_CHAT_PROGRESS:
-                        NEW_CHAT_PROGRESS[data.session_id]["token_summary"] = token_summary
+                    st = NEW_CHAT_PROGRESS.get(data.session_id)
+                    if not isinstance(st, dict):
+                        st = {
+                            "status": "started",
+                            "progress": 0,
+                            "message": "starting new chat",
+                            "timestamp": datetime.utcnow().isoformat(),
+                        }
+                        NEW_CHAT_PROGRESS[data.session_id] = st
+                    st["token_summary"] = token_summary
                 except Exception:
                     pass
                 
@@ -2018,6 +2026,26 @@ def new_chat(data: NewChatIn):
                 logging.info(f"[TOKEN_DEBUG] No token log to report for session {data.session_id}")
         except Exception as e:
             logging.error(f"[TOKEN_DEBUG] Error generating token summary: {type(e).__name__}: {e}")
+
+        # Ensure the progress state always reaches a terminal status so the frontend
+        # polling loop can stop and print token summaries.
+        try:
+            st = NEW_CHAT_PROGRESS.get(data.session_id)
+            if isinstance(st, dict):
+                cur_status = st.get("status")
+                if cur_status not in ("done", "error", "awaiting_clarification"):
+                    st["status"] = "done"
+                    st["progress"] = 100
+                    if not st.get("message"):
+                        if not session_history:
+                            st["message"] = "nothing to summarize"
+                        elif not extracted_memory:
+                            st["message"] = "no durable memory extracted"
+                        else:
+                            st["message"] = "completed"
+                    st["completed_at"] = datetime.utcnow().isoformat()
+        except Exception:
+            pass
 
         return {
             "status": "ok",
