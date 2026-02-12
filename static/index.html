@@ -137,7 +137,37 @@
             font-size: 24px;
             cursor: pointer;
             padding: 4px 8px;
+            display: block;
+        }
+
+        /* Collapsed sidebar state (keeps header and new-chat visible) */
+        #sidebar.collapsed {
+            width: 64px;
+        }
+
+        #sidebar.collapsed #chat-list,
+        #sidebar.collapsed .chat-item,
+        #sidebar.collapsed .chat-item-title,
+        #sidebar.collapsed .chat-item-preview,
+        #sidebar.collapsed .chat-item-time {
             display: none;
+        }
+
+        #sidebar.collapsed #debug-panel {
+            display: none;
+        }
+
+        #sidebar.collapsed #sidebar-header {
+            justify-content: center;
+            gap: 0;
+        }
+
+        #sidebar.collapsed #sidebar-header span { display:none; }
+
+        #sidebar.collapsed #new-chat-btn {
+            padding: 6px 10px;
+            border-radius: 10px;
+            font-size: 13px;
         }
 
         #header-title {
@@ -563,12 +593,11 @@
         <div id="sidebar">
             <div id="sidebar-header">
                 <span>Chats</span>
-                <button id="new-chat-btn">+ New Chat</button>
             </div>
             <div id="chat-list">
                 <!-- Chat items will appear here -->
             </div>
-            <div id="debug-panel" style="border-top:1px solid #eee;background:#fff;padding:8px 8px;font-size:13px;color:#333;">
+            <div id="debug-panel" style="border-top:1px solid #eee;background:#fff;padding:8px 8px;font-size:13px;color:#333;display:none;">
                 <div style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;">
                     <strong>Debug</strong>
                     <div>
@@ -586,11 +615,14 @@
         <!-- Main chat area -->
         <div id="main-content">
             <header>
-                <button id="toggle-sidebar" aria-label="Toggle sidebar">☰</button>
+                <button id="toggle-sidebar" aria-label="Toggle sidebar" title="Collapse sidebar">◀</button>
                 <div id="header-title">
                     Alexi, the Alex chatbot
                     <span id="current-user-display"></span>
                     <button id="change-user-btn" title="Change user">Change</button>
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;margin-left:8px;">
+                    <button id="new-chat-btn">+ New Chat</button>
                 </div>
                 <div id="model-selector-container">
                     <label for="model-selector">Model:</label>
@@ -648,7 +680,7 @@
         // Console debug toggle and wrapper
         const consoleToggleEl = document.getElementById('enable-console-logs');
         function isConsoleEnabled() {
-            try { return localStorage.getItem('alex_console_logs') === '1'; } catch (e) { return false; }
+            try { return localStorage.getItem('alex_console_logs') === '1'; } catch (e) { return true; }
         }
         function setConsoleEnabled(v) {
             try { localStorage.setItem('alex_console_logs', v ? '1' : '0'); } catch (e) {}
@@ -657,7 +689,8 @@
         function debugLog(...args) {
             if (isConsoleEnabled()) console.log('[DEBUG]', ...args);
         }
-        // initialize checkbox state (if present)
+        // enable console logs by default and initialize checkbox state (if present)
+        try { if (localStorage.getItem('alex_console_logs') === null) setConsoleEnabled(true); } catch (e) { setConsoleEnabled(true); }
         if (consoleToggleEl) {
             consoleToggleEl.checked = isConsoleEnabled();
             consoleToggleEl.addEventListener('change', (e) => setConsoleEnabled(e.target.checked));
@@ -1181,10 +1214,23 @@
         });
 
     newChatBtn.addEventListener('click', endCurrentChatAndStartNew);
-        
+
         toggleSidebarBtn.addEventListener('click', () => {
-            sidebar.classList.toggle('hidden');
+            // Toggle collapsed state instead of fully hiding sidebar
+            sidebar.classList.toggle('collapsed');
+            const collapsed = sidebar.classList.contains('collapsed');
+            toggleSidebarBtn.textContent = collapsed ? '▶' : '◀';
+            toggleSidebarBtn.title = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
         });
+
+        // Initialize chevron icon and tooltip based on current state
+        (function(){
+            try {
+                const collapsed = sidebar.classList.contains('collapsed');
+                toggleSidebarBtn.textContent = collapsed ? '▶' : '◀';
+                toggleSidebarBtn.title = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
+            } catch (e) { /* ignore */ }
+        })();
 
         // Initialize
         if (checkUser()) {
