@@ -572,7 +572,11 @@
                 <div style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;">
                     <strong>Debug</strong>
                     <div>
-                        <button id="refresh-debug" style="background:#f0f0f0;border:1px solid #ddd;padding:6px 8px;border-radius:6px;cursor:pointer">Refresh</button>
+                            <button id="refresh-debug" style="background:#f0f0f0;border:1px solid #ddd;padding:6px 8px;border-radius:6px;cursor:pointer">Refresh</button>
+                            <label style="margin-left:8px;font-size:13px;display:inline-flex;align-items:center;gap:6px;">
+                                <input id="enable-console-logs" type="checkbox" />
+                                <span style="font-size:13px;color:#666">Console logs</span>
+                            </label>
                     </div>
                 </div>
                 <div id="debug-output" style="max-height:200px;overflow:auto;padding:8px 12px;font-size:13px;color:#333;white-space:pre-wrap"></div>
@@ -641,6 +645,23 @@
         const modelSelector = document.getElementById('model-selector');
         const tokenUsageEl = document.getElementById('token-usage');
         const dbStatusEl = document.getElementById('db-status');
+        // Console debug toggle and wrapper
+        const consoleToggleEl = document.getElementById('enable-console-logs');
+        function isConsoleEnabled() {
+            try { return localStorage.getItem('alex_console_logs') === '1'; } catch (e) { return false; }
+        }
+        function setConsoleEnabled(v) {
+            try { localStorage.setItem('alex_console_logs', v ? '1' : '0'); } catch (e) {}
+            if (consoleToggleEl) consoleToggleEl.checked = !!v;
+        }
+        function debugLog(...args) {
+            if (isConsoleEnabled()) console.log('[DEBUG]', ...args);
+        }
+        // initialize checkbox state (if present)
+        if (consoleToggleEl) {
+            consoleToggleEl.checked = isConsoleEnabled();
+            consoleToggleEl.addEventListener('change', (e) => setConsoleEnabled(e.target.checked));
+        }
         
         // User management
         let currentUser = null;
@@ -670,6 +691,7 @@
             try {
                 const resp = await fetch('/db_status');
                 const j = await resp.json();
+                debugLog('checkDbStatus:resp', j);
                 if (j && j.connected) {
                     dbStatusEl.textContent = 'DB: Connected';
                     dbStatusEl.style.color = '#b2f5ea';
@@ -680,6 +702,7 @@
                     dbStatusEl.style.opacity = '0.95';
                 }
             } catch (e) {
+                debugLog('checkDbStatus:error', e);
                 dbStatusEl.textContent = 'DB: Unreachable';
                 dbStatusEl.style.color = '#ffb3b3';
                 dbStatusEl.style.opacity = '0.95';
@@ -980,9 +1003,11 @@
             const container = document.getElementById('debug-output');
             if (!container) return;
             container.textContent = 'Loading debug info...';
+            debugLog('fetchDebugInfo:start');
             try {
                 const res = await fetch('/debug/db');
                 const data = await res.json();
+                debugLog('fetchDebugInfo:result', data);
                 container.innerHTML = '';
                 // Pretty print key / value pairs
                 for (const [k, v] of Object.entries(data)) {
@@ -992,6 +1017,7 @@
                     container.appendChild(row);
                 }
             } catch (err) {
+                debugLog('fetchDebugInfo:error', err);
                 container.textContent = 'Error loading debug info: ' + (err.message || err);
             }
         }
@@ -1070,6 +1096,8 @@
             const message = messageInput.value.trim();
             if (!message || !currentChatId) return;
 
+            debugLog('sendMessage:start', { messagePreview: message.slice(0,80), chatId: currentChatId });
+
             // Disable input while processing
             messageInput.disabled = true;
             sendBtn.disabled = true;
@@ -1097,6 +1125,7 @@
                 });
 
                 const data = await response.json();
+                debugLog('sendMessage:response', data);
                 
                 // Hide typing indicator
                 showTyping(false);
@@ -1129,6 +1158,7 @@
                     tokenUsageEl.title = '';
                 }
             } catch (error) {
+                debugLog('sendMessage:error', error);
                 showTyping(false);
                 addMessage('System', 'Failed to send message: ' + error.message);
             } finally {

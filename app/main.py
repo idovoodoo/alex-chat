@@ -1062,6 +1062,65 @@ def _summarize_conversation(session_history: list, user_name: str = "User") -> s
         return ""
 
 
+def _get_tags_for_candidates(candidate_lines: list[str]) -> dict:
+    """Ask the LLM to provide 1-3 short tags for each candidate memory line.
+
+    Returns a mapping {memory_line: [tag1, tag2, ...]}.
+    """
+    if not candidate_lines:
+        return {}
+
+    try:
+        prompt = (
+            "For each of the following short personal memory sentences, provide 1 to 3 short tags (single words or very short phrases) that describe the topic."
+            " Return ONLY a JSON array of arrays where each element is the list of tags for the corresponding memory in order.\n\n"
+            "Memories:\n"
+        )
+        for ln in candidate_lines:
+            prompt += f"- {ln}\n"
+
+        summary, usage = _openai_chat_completion(
+            model="gpt-5-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=512,
+        )
+
+        tags_map: dict = {}
+        resp_text = (summary or "").strip()
+        if not resp_text:
+            return {}
+
+        # Try to parse JSON first
+        try:
+            parsed = json.loads(resp_text)
+            # parsed expected to be list of lists
+            for i, ln in enumerate(candidate_lines):
+                if i < len(parsed) and isinstance(parsed[i], list):
+                    tags_map[ln] = [str(t).strip() for t in parsed[i] if str(t).strip()]
+                else:
+                    tags_map[ln] = []
+            if isinstance(LAST_NEW_CHAT_DEBUG, dict):
+                LAST_NEW_CHAT_DEBUG["tags_extraction_result"] = parsed
+            return tags_map
+        except Exception:
+            # fallback: parse line-by-line CSV or one-line JSON-ish
+            lines = [l.strip() for l in resp_text.splitlines() if l.strip()]
+            for i, ln in enumerate(candidate_lines):
+                if i < len(lines):
+                    parts = [p.strip() for p in re.split(r"[,;]", lines[i]) if p.strip()]
+                    tags_map[ln] = parts
+                else:
+                    tags_map[ln] = []
+            if isinstance(LAST_NEW_CHAT_DEBUG, dict):
+                LAST_NEW_CHAT_DEBUG["tags_extraction_fallback"] = lines
+            return tags_map
+    except Exception as e:
+        logging.error(f"_get_tags_for_candidates error: {type(e).__name__}: {e}")
+        if isinstance(LAST_NEW_CHAT_DEBUG, dict):
+            LAST_NEW_CHAT_DEBUG["tags_extraction_error"] = f"{type(e).__name__}: {e}"
+        return {}
+
+
 def _check_duplicate_memory(new_memory: str, threshold: float = 0.85, check_life_memories: bool = True) -> bool:
     """Check if a memory is a duplicate using cosine similarity.
     
@@ -1154,7 +1213,7 @@ def _save_memory(memory_line: str):
         pass
 
 
-def _save_life_memory(memory_line: str):
+def _save_life_memory(memory_line: str, tags: list[str] | None = None):
     """Append a memory line to Supabase memories table with type='life'.
     
     Args:
@@ -1171,19 +1230,37 @@ def _save_life_memory(memory_line: str):
         if _ensure_db_connection():
             # Split multi-line memory into individual lines
             new_memories = [line.strip() for line in memory_line.split("\n") if line.strip()]
-            
+
             if isinstance(LAST_NEW_CHAT_DEBUG, dict):
                 LAST_NEW_CHAT_DEBUG["db_connection"] = "established"
                 LAST_NEW_CHAT_DEBUG["memories_to_insert"] = new_memories
-            
-            # Insert each memory into the database
+
+            # Normalize tags parameter: either None or list matching new_memories length
+            tags_list = None
+            if tags and isinstance(tags, list):
+                # If tags is a flat list of tag strings for a single memory, convert to per-memory list
+                if len(new_memories) == 1 and all(isinstance(t, str) for t in tags):
+                    tags_list = [tags]
+                elif len(tags) == len(new_memories):
+                    tags_list = tags
+                else:
+                    # provided tags don't match length; ignore
+                    tags_list = None
+
+            # Insert each memory into the database; include tags when available
             with DB_CONN.cursor() as cur:
-                for mem in new_memories:
+                for idx, mem in enumerate(new_memories):
                     logging.info(f"Executing INSERT for life memory: '{mem}'")
-                    cur.execute("INSERT INTO memories (content, type) VALUES (%s, %s)", (mem, 'life'))
+                    if tags_list and idx < len(tags_list) and tags_list[idx]:
+                        cur.execute(
+                            "INSERT INTO memories (content, type, tags) VALUES (%s, %s, %s)",
+                            (mem, 'life', tags_list[idx])
+                        )
+                    else:
+                        cur.execute("INSERT INTO memories (content, type) VALUES (%s, %s)", (mem, 'life'))
             DB_CONN.commit()
             logging.info(f"Saved {len(new_memories)} life memories to database (committed)")
-            
+
             if isinstance(LAST_NEW_CHAT_DEBUG, dict):
                 LAST_NEW_CHAT_DEBUG["db_insert_count"] = len(new_memories)
                 LAST_NEW_CHAT_DEBUG["db_commit"] = "success"
@@ -1710,6 +1787,56 @@ def new_chat(data: NewChatIn):
                 NEW_CHAT_PROGRESS[data.session_id]["message"] = f"{len(candidate_lines)} candidate(s) to check"
                 LAST_NEW_CHAT_DEBUG["candidate_memory_lines"] = candidate_lines
 
+                # Detect ambiguous "we" references and ask clarification immediately
+                clarification_questions: list[str] = []
+                ambiguous_patterns = [
+                    r"\bremember when we\b",
+                    r"\bwe (are|did|went|were|have|had|will|visited|traveled|went to|went skiing)\b",
+                ]
+                for ln in candidate_lines:
+                    low = ln.lower()
+                    for pat in ambiguous_patterns:
+                        if re.search(pat, low):
+                            q = f'Who does "we" refer to in the memory: "{ln}"?'
+                            clarification_questions.append(q)
+                            break
+
+                if clarification_questions:
+                    LAST_NEW_CHAT_DEBUG["clarification_needed"] = True
+                    LAST_NEW_CHAT_DEBUG["clarification_questions"] = clarification_questions
+                    # Append assistant follow-up(s) into the session history so the user sees them
+                    session_history = CONVERSATION_HISTORY.get(data.session_id, [])
+                    for q in clarification_questions:
+                        try:
+                            session_history.append({"role": "assistant", "content": q})
+                        except Exception:
+                            pass
+                    CONVERSATION_HISTORY[data.session_id] = session_history
+                    # Update progress and return early so we don't clear history or save ambiguous memories
+                    NEW_CHAT_PROGRESS[data.session_id]["status"] = "awaiting_clarification"
+                    NEW_CHAT_PROGRESS[data.session_id]["progress"] = 50
+                    NEW_CHAT_PROGRESS[data.session_id]["message"] = "awaiting clarification for ambiguous 'we' references"
+                    # Do not clear session history; return to caller with clarification info
+                    LAST_NEW_CHAT_DEBUG["note"] = "clarification requested for ambiguous 'we'"
+                    return {
+                        "status": "ok",
+                        "message": "Clarification requested",
+                        "summary_saved": False,
+                        "duplicate_detected": False,
+                        "extracted_memory": extracted_memory,
+                        "clarification_needed": True,
+                        "clarification_questions": clarification_questions,
+                    }
+
+                # Get tags for each candidate memory (1-3 short tags per memory)
+                tags_map = {}
+                try:
+                    tags_map = _get_tags_for_candidates(candidate_lines)
+                except Exception:
+                    tags_map = {}
+                if isinstance(LAST_NEW_CHAT_DEBUG, dict):
+                    LAST_NEW_CHAT_DEBUG["tags_map"] = tags_map
+
                 saved_lines: list[str] = []
                 skipped_duplicates: list[str] = []
                 LAST_NEW_CHAT_DEBUG["duplicate_check"] = "started"
@@ -1733,7 +1860,9 @@ def new_chat(data: NewChatIn):
                         continue
 
                     try:
-                        _save_life_memory(line)
+                        # Pass tags for this line if available
+                        tags_for_line = tags_map.get(line) if isinstance(tags_map, dict) else None
+                        _save_life_memory(line, tags=tags_for_line)
                         saved_lines.append(line)
                         summary_saved = True
                         # update progress
