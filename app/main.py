@@ -129,6 +129,9 @@ RAG_INDEX = None
 RAG_CHUNKS = None
 RAG_ERROR = None
 MEMORIES = None
+CORE_MEMORY_TEXTS: list[str] | None = None
+CORE_MEMORY_EMBEDDINGS: np.ndarray | None = None  # shape (n, d), row-normalized
+CORE_MEMORY_EMBEDDINGS_ERROR: str | None = None
 DB_CONN = None
 DB_LAST_ERROR = None
 LAST_LIFE_RECALL = None
@@ -204,6 +207,13 @@ def _load_rag_assets():
             DB_LAST_ERROR = None
         else:
             logging.info("Database not connected")
+
+    # Build in-memory similarity index for core memories (best-effort)
+    try:
+        _build_core_memory_embeddings()
+    except Exception:
+        # Never crash startup due to memory embedding.
+        pass
 
 
 def _ensure_db_connection():
@@ -317,6 +327,9 @@ def _debug_db():
         
         "_section_memory_counts": "=== MEMORY COUNTS ===",
         "cached_core_memories": len(MEMORIES) if isinstance(MEMORIES, list) else 0,
+        "core_memory_embeddings_built": bool(CORE_MEMORY_EMBEDDINGS is not None and CORE_MEMORY_TEXTS is not None),
+        "core_memory_embeddings_count": int(len(CORE_MEMORY_TEXTS) if isinstance(CORE_MEMORY_TEXTS, list) else 0),
+        "core_memory_embeddings_error": CORE_MEMORY_EMBEDDINGS_ERROR,
         
         "_section_patterns": "=== DETECTION PATTERNS ===",
         "recall_triggers": len(_RECALL_TRIGGERS),
@@ -394,6 +407,15 @@ def _debug_db():
     except Exception as e:
         diagnostics["last_recall_attempt"] = f"error: {str(e)}"
 
+    # Also print to server console (Render logs) so this is visible without UI.
+    try:
+        payload = json.dumps(diagnostics, ensure_ascii=False, default=str)
+        if len(payload) > 12000:
+            payload = payload[:12000] + "…(truncated)"
+        logging.info(f"/debug/db diagnostics: {payload}")
+    except Exception:
+        logging.info("/debug/db diagnostics: (failed to serialize)")
+
     return diagnostics
 
 
@@ -429,6 +451,65 @@ def _embed_text(text: str) -> tuple[np.ndarray, int]:
     return np.asarray(vec, dtype=np.float32), int(tokens_used)
 
 
+def _build_core_memory_embeddings() -> None:
+    """Build a row-normalized embedding matrix for core memories (type='core').
+
+    This is called at startup so each memory entry is embedded once (best-effort).
+    Query-time selection embeds the user message and does a cosine similarity search.
+    """
+    global CORE_MEMORY_TEXTS, CORE_MEMORY_EMBEDDINGS, CORE_MEMORY_EMBEDDINGS_ERROR
+
+    CORE_MEMORY_TEXTS = None
+    CORE_MEMORY_EMBEDDINGS = None
+    CORE_MEMORY_EMBEDDINGS_ERROR = None
+
+    if MEMORIES is None or not isinstance(MEMORIES, list):
+        return
+
+    memory_texts: list[str] = [m.strip() for m in MEMORIES if isinstance(m, str) and m.strip()]
+    if not memory_texts:
+        CORE_MEMORY_TEXTS = []
+        CORE_MEMORY_EMBEDDINGS = None
+        return
+
+    vectors: list[np.ndarray] = []
+    kept_texts: list[str] = []
+    expected_d: int | None = None
+
+    try:
+        for m in memory_texts:
+            try:
+                v, _tok = _embed_text(m)
+                if v.ndim != 1:
+                    continue
+                if expected_d is None:
+                    expected_d = int(v.shape[0])
+                elif int(v.shape[0]) != expected_d:
+                    continue
+                n = float(np.linalg.norm(v))
+                if n <= 0:
+                    continue
+                vectors.append((v / n).astype(np.float32))
+                kept_texts.append(m)
+            except Exception:
+                # Best-effort: skip individual failures.
+                continue
+
+        if not vectors:
+            CORE_MEMORY_TEXTS = []
+            CORE_MEMORY_EMBEDDINGS = None
+            return
+
+        CORE_MEMORY_TEXTS = kept_texts
+        CORE_MEMORY_EMBEDDINGS = np.vstack(vectors).astype(np.float32)
+        logging.info(f"Embedded {len(kept_texts)} core memories for similarity search")
+    except Exception as e:
+        CORE_MEMORY_TEXTS = []
+        CORE_MEMORY_EMBEDDINGS = None
+        CORE_MEMORY_EMBEDDINGS_ERROR = f"{type(e).__name__}: {e}"
+        logging.exception("Failed to build core memory embeddings")
+
+
 def _retrieve_top_chunks(query: str, k: int = 2) -> tuple[list[str], int]:
     """Returns (results, tokens_used_by_embedding).
 
@@ -456,10 +537,74 @@ def _retrieve_top_chunks(query: str, k: int = 2) -> tuple[list[str], int]:
 
 
 def _select_memories(query: str, k: int = 5) -> list[str]:
-    """Returns up to k relevant memories. Simple version: returns first k."""
-    if MEMORIES is None or not isinstance(MEMORIES, list):
+    """Return up to k *relevant* core memories by embedding similarity.
+
+    Embeds the user message on each call, then retrieves the top matches from
+    the startup-built core memory embedding matrix.
+
+    To avoid injecting unrelated memories, applies conservative similarity gates
+    and may return an empty list.
+    """
+    if not isinstance(query, str) or not query.strip():
         return []
-    return MEMORIES[:k]
+    if CORE_MEMORY_EMBEDDINGS is None or CORE_MEMORY_TEXTS is None:
+        return []
+    if not CORE_MEMORY_TEXTS:
+        return []
+
+    try:
+        k_int = int(k)
+    except Exception:
+        k_int = 3
+    # Requirement: inject only the top 1–3 relevant memories
+    k_int = max(1, min(3, k_int))
+
+    n = int(CORE_MEMORY_EMBEDDINGS.shape[0])
+    if n <= 0:
+        return []
+
+    # Requirement: embed the user message on each query
+    q, _tok = _embed_text(query)
+    qn = float(np.linalg.norm(q))
+    if qn <= 0:
+        return []
+    q_unit = (q / qn).astype(np.float32)
+
+    sims = CORE_MEMORY_EMBEDDINGS @ q_unit  # cosine similarity due to normalization
+    k0 = min(k_int, n)
+
+    top_idx = np.argpartition(-sims, range(k0))[:k0]
+    top_idx = top_idx[np.argsort(-sims[top_idx])]
+
+    best = float(sims[int(top_idx[0])])
+
+    # Conservative filters to avoid unrelated injections.
+    abs_min = 0.22
+    if best < abs_min:
+        return []
+
+    rel_gate = max(abs_min, best * 0.85)
+
+    picked: list[str] = []
+    for i in top_idx.tolist():
+        s = float(sims[int(i)])
+        if s < rel_gate:
+            continue
+        if 0 <= int(i) < len(CORE_MEMORY_TEXTS):
+            picked.append(CORE_MEMORY_TEXTS[int(i)])
+        if len(picked) >= k_int:
+            break
+
+    # Console log for debugging (kept short to avoid noise)
+    try:
+        if picked:
+            preview = [p[:120] + ("…" if len(p) > 120 else "") for p in picked]
+            logging.info(f"Core memories selected: count={len(picked)} best_sim={best:.3f} gate={rel_gate:.3f} preview={preview}")
+        else:
+            logging.info(f"Core memories selected: none (best_sim={best:.3f} < gate)")
+    except Exception:
+        pass
+    return picked
 
 
 def _reload_memories():
@@ -482,6 +627,12 @@ def _reload_memories():
         logging.info(f"Reloaded core memories: {count} items in MEMORIES")
     except Exception:
         logging.info("Reloaded core memories (count unknown)")
+
+    # Keep similarity index in sync (best-effort)
+    try:
+        _build_core_memory_embeddings()
+    except Exception:
+        pass
 
 
 _RECALL_TRIGGERS = {
@@ -705,11 +856,10 @@ def _search_life_memories(message: str, limit: int = 3) -> list[str]:
 
 
 def _summarize_conversation(session_history: list) -> str:
-    """Extract ONE durable factual memory from conversation.
-    
-    Returns a single third-person, present-tense factual statement.
-    No emotions, no temporary details, no speculation.
-    Returns empty string if no durable fact exists or extraction fails.
+    """Extract 0..N durable personal memories from conversation.
+
+    Returns one short factual sentence per line (no bullets/numbering).
+    Returns empty string if no valid personal/contextual memory exists or extraction fails.
     """
     global LAST_NEW_CHAT_DEBUG
     
@@ -734,16 +884,20 @@ def _summarize_conversation(session_history: list) -> str:
     # Create strict summarization prompt
     # GPT-5 models use thinking tokens, so we need to be explicit about output format
     summary_prompt = (
-        "Extract ONE durable factual memory from this conversation.\n\n"
-        "Requirements:\n"
-        "- Third person (e.g., 'User went skiing in France')\n"
-        "- Present tense\n"
-        "- One factual statement only\n"
-        "- No emotions or opinions\n"
-        "- No temporary details\n"
-        "- If no durable fact exists, output exactly: NONE\n\n"
+        "Convert this chat into personal memory entries.\n\n"
+        "Rules:\n"
+        "- Output 1 to 5 short factual sentences, EACH on its own line.\n"
+        "- Each sentence must be about the user, Alex, or someone in their lives.\n"
+        "- Each sentence must describe a personal habit, preference, situation, plan, or experience.\n"
+        "- Use only information stated by the USER. Ignore anything said by Alex/assistant.\n"
+        "- Do NOT output general knowledge, definitions, or explanations.\n"
+        "- Do NOT restate or summarize AI answers.\n"
+        "- If no valid personal/contextual memory exists, output exactly: NONE\n\n"
+        "Output format:\n"
+        "- Return ONLY the sentences (or NONE).\n"
+        "- One sentence per line. No numbering, no bullet points, no commentary, no quotes.\n\n"
         f"Conversation:\n{conversation_text}\n\n"
-        "Output only the memory sentence (or NONE):"
+        "Return ONLY the sentences (or NONE):"
     )
     
     try:
@@ -787,12 +941,61 @@ def _summarize_conversation(session_history: list) -> str:
                 LAST_NEW_CHAT_DEBUG["final_result"] = "NONE or empty"
             return ""
         
-        # Take only the first line if multiple were returned
-        first_line = summary.split('\n')[0].strip()
-        logging.info(f"_summarize_conversation: extracted memory: '{first_line}'")
+        # Split to candidate lines; enforce 1 sentence per line; filter junk.
+        lines_in = [ln.strip() for ln in summary.split("\n") if ln.strip()]
+        if not lines_in:
+            return ""
+        if len(lines_in) == 1 and lines_in[0].upper() == "NONE":
+            logging.info("_summarize_conversation: no valid memory found (NONE)")
+            if isinstance(LAST_NEW_CHAT_DEBUG, dict):
+                LAST_NEW_CHAT_DEBUG["final_result"] = "NONE"
+            return ""
+
+        bad_phrases = (
+            " is defined as ",
+            " refers to ",
+            " means ",
+            " in general ",
+            " generally ",
+            " as an ai ",
+            " i am an ai ",
+        )
+
+        cleaned: list[str] = []
+        seen_norm: set[str] = set()
+
+        for ln in lines_in:
+            if ln.upper() == "NONE":
+                continue
+            if ln.startswith("-"):
+                ln = ln.lstrip("- ").strip()
+            # Enforce one sentence
+            ln = re.split(r"(?<=[.!?])\s+", ln, maxsplit=1)[0].strip()
+            if not ln:
+                continue
+
+            lower = f" {ln.lower()} "
+            if any(p in lower for p in bad_phrases):
+                continue
+            if len(ln.split()) > 25:
+                continue
+
+            norm = re.sub(r"\s+", " ", ln.lower()).strip()
+            if norm in seen_norm:
+                continue
+            seen_norm.add(norm)
+            cleaned.append(ln)
+            if len(cleaned) >= 5:
+                break
+
+        if not cleaned:
+            return ""
+
+        out = "\n".join(cleaned)
+        logging.info(f"_summarize_conversation: extracted {len(cleaned)} memory line(s)")
         if isinstance(LAST_NEW_CHAT_DEBUG, dict):
-            LAST_NEW_CHAT_DEBUG["final_result"] = first_line
-        return first_line
+            LAST_NEW_CHAT_DEBUG["final_result"] = cleaned
+        return out
     except Exception as e:
         logging.error(f"_summarize_conversation: error: {type(e).__name__}: {e}")
         if isinstance(LAST_NEW_CHAT_DEBUG, dict):
@@ -1039,8 +1242,8 @@ def chat(data: ChatIn):
                 if len(examples) >= 2:
                     break
 
-        # Get memories to inject into prompt
-        memories = _select_memories(data.message, k=5)
+        # Get memories to inject into prompt (top 1–3, relevant only)
+        memories = _select_memories(data.message, k=3)
 
         # Optional: retrieve life memories only when the message suggests recall or is a past factual question
         life_memories: list[str] = []
@@ -1391,7 +1594,7 @@ def new_chat(data: NewChatIn):
         
         # If there's conversation history, summarize and save it
         if session_history:
-            # Extract ONE durable factual memory
+            # Extract 0..N personal memory lines (one per line)
             summary = _summarize_conversation(session_history)
             extracted_memory = summary
 
@@ -1405,26 +1608,38 @@ def new_chat(data: NewChatIn):
                 LAST_NEW_CHAT_DEBUG["note"] = "no durable memory extracted"
             
             if summary:
-                # Check for duplicates using cosine similarity (threshold 0.85) against life memories
-                logging.info(f"Checking for duplicate memory: '{summary}'")
+                # Split into separate DB entries (one per line) and apply duplicate check per entry.
+                candidate_lines = [ln.strip() for ln in str(summary).split("\n") if ln.strip()]
+                LAST_NEW_CHAT_DEBUG["candidate_memory_lines"] = candidate_lines
+
+                saved_lines: list[str] = []
+                skipped_duplicates: list[str] = []
                 LAST_NEW_CHAT_DEBUG["duplicate_check"] = "started"
-                
-                is_duplicate = _check_duplicate_memory(summary, threshold=0.85, check_life_memories=True)
-                
-                LAST_NEW_CHAT_DEBUG["duplicate_check_result"] = is_duplicate
-                
-                if is_duplicate:
-                    duplicate_detected = True
-                    logging.info(f"Memory not saved (duplicate): {summary}")
-                    LAST_NEW_CHAT_DEBUG["save_action"] = "skipped (duplicate)"
-                else:
-                    # Not a duplicate, save to memories table (type='life')
-                    logging.info(f"Saving new life memory: '{summary}'")
-                    LAST_NEW_CHAT_DEBUG["save_action"] = "attempting save"
-                    _save_life_memory(summary)
-                    summary_saved = True
-                    logging.info(f"New life_memory saved: {summary}")
-                    LAST_NEW_CHAT_DEBUG["save_result"] = "success"
+
+                for line in candidate_lines:
+                    try:
+                        is_duplicate = _check_duplicate_memory(line, threshold=0.85, check_life_memories=True)
+                    except Exception:
+                        is_duplicate = False
+
+                    if is_duplicate:
+                        duplicate_detected = True
+                        skipped_duplicates.append(line)
+                        continue
+
+                    try:
+                        _save_life_memory(line)
+                        saved_lines.append(line)
+                        summary_saved = True
+                    except Exception:
+                        pass
+
+                LAST_NEW_CHAT_DEBUG["duplicate_check_result"] = {
+                    "saved": len(saved_lines),
+                    "skipped_duplicates": len(skipped_duplicates),
+                }
+                LAST_NEW_CHAT_DEBUG["saved_lines"] = saved_lines
+                LAST_NEW_CHAT_DEBUG["skipped_duplicates"] = skipped_duplicates
         else:
             LAST_NEW_CHAT_DEBUG["note"] = "no session history"
         
