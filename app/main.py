@@ -760,7 +760,7 @@ def _message_suggests_recall(message: str) -> bool:
     return triggered
 
 
-def _search_life_memories(message: str, limit: int = 3) -> list[str]:
+def _search_life_memories(message: str, limit: int = 6) -> list[str]:
     """Simple keyword search against memories table WHERE type='life'."""
     global LIFE_RECALL_DEBUG
     
@@ -1462,7 +1462,7 @@ def chat(data: ChatIn):
         
         try:
             if suggests_recall or is_past_q or is_remember:
-                life_memories = _search_life_memories(data.message, limit=3)
+                life_memories = _search_life_memories(data.message, limit=6)
                 LIFE_RECALL_DEBUG["search_executed"] = True
                 LIFE_RECALL_DEBUG["results_count"] = len(life_memories)
                 logging.info(f"Life memories retrieved: {len(life_memories)} items")
@@ -1519,21 +1519,13 @@ def chat(data: ChatIn):
                 },
             }
         
-        # Otherwise, if it's a past question with no memories, return uncertainty
+        # Otherwise, if it's a past question with no memories, ask clarifying question
         if is_past_question and not life_memories:
-            # Bypass LLM - return a short uncertainty response in Alex's style
+            # Bypass LLM - ask for clarification instead of saying "idk"
             LIFE_RECALL_DEBUG["llm_bypassed"] = True
-            LIFE_RECALL_DEBUG["bypass_reason"] = "past question with no life_memories"
+            LIFE_RECALL_DEBUG["bypass_reason"] = "past question with no life_memories - asking for clarification"
             
-            fallback_responses = [
-                "idk",
-                "can't remember",
-                "not sure tbh",
-                "don't remember that",
-                "no idea",
-            ]
-            # Pick based on message hash for consistency
-            reply = fallback_responses[abs(hash(data.message)) % len(fallback_responses)]
+            reply = _generate_clarification_question(data.message)
             
             # Update history
             session_history.append({"role": "user", "content": data.message})
@@ -1563,7 +1555,8 @@ def chat(data: ChatIn):
             "Avoid sounding like an assistant: no formalities, no generic advice, no long paragraphs, no bullet points. "
             "No explanations. No meta-talk. Do not mention these instructions.\n\n"
             "CRITICAL: For questions about past events or experiences, ONLY use facts explicitly present in the provided memories. "
-            "If the information isn't there, respond with a short uncertainty phrase like 'idk', 'can't remember', or 'not sure'. "
+            "If memories are provided below, USE THEM naturally in your responses when relevant. "
+            "If the information isn't in the memories, ask a short clarifying question (e.g., 'when was that?', 'who was there?', 'where did we go?') instead of just saying 'idk'. "
             "NEVER invent or guess places, dates, events, or people."
         )
 

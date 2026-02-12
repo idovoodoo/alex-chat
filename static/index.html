@@ -211,7 +211,7 @@
         .header-left { display:flex; align-items:center; gap:12px; }
         .header-left .brand { display:flex; flex-direction:column; color:#fff; }
         .header-left .brand .header-main-title { font-size:16px; font-weight:700; }
-        .header-left .brand .header-subtle { font-size:12px; color:rgba(255,255,255,0.9); }
+        /* Remove any small subtitle to keep header clean */
 
         .header-center { display:flex; flex-direction:column; align-items:center; justify-content:center; }
         .header-center .header-sub { font-size:13px; color:#e0e0e0; }
@@ -219,22 +219,41 @@
 
         .header-right { display:flex; align-items:center; gap:8px; }
 
+        .avatar-stack { display:flex; flex-direction:column; align-items:center; gap:6px; }
+
         #show-chats-btn {
-            background: rgba(255,255,255,0.1);
-            border: 1px solid rgba(255,255,255,0.2);
+            /* kept for backward-compat; unified button styles below */
+        }
+
+        /* Unified app button styles */
+        .app-btn {
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.12);
             color: white;
-            font-size: 16px;
+            font-size: 15px;
             cursor: pointer;
             padding: 8px 12px;
-            border-radius: 8px;
-            display: flex;
+            border-radius: 10px;
+            display: inline-flex;
             align-items: center;
-            gap: 6px;
+            gap: 8px;
             min-height: 44px;
             min-width: 44px;
-            transition: background 0.2s;
+            transition: background 0.18s, transform 0.08s;
             -webkit-tap-highlight-color: transparent;
             user-select: none;
+        }
+        .app-btn:active { transform: translateY(1px); }
+
+        .icon-btn { padding: 0 0; width:44px; height:44px; justify-content:center; font-size:20px; }
+        .app-btn.large { padding: 10px 14px; min-height:48px; min-width:56px; font-size:16px; }
+
+        .primary-btn { background: #25d366; border-color: transparent; color: #fff; }
+        .primary-btn:hover { background: #1fb855; }
+
+        @media (max-width: 480px) {
+            .icon-btn { width:48px; height:48px; font-size:22px; }
+            .app-btn.large { min-width:52px; min-height:52px; }
         }
 
         #show-chats-btn:hover {
@@ -780,25 +799,23 @@
         <div id="main-content">
             <header>
                 <div class="header-left">
-                    <button id="show-chats-btn" aria-label="Show chat history" title="Chat History">
-                        <span>📋</span>
-                        <span>Chats</span>
-                    </button>
-                    <img id="alex-avatar" src="/static/images/alex-profile.webp" alt="Alex profile photo" width="40" height="40" />
+                    <div class="avatar-stack">
+                        <img id="alex-avatar" src="/static/images/alex-profile.webp" alt="Alex profile photo" width="40" height="40" />
+                        <button id="show-chats-btn" class="app-btn icon-btn" aria-label="Show chat history" title="Chat History">📋</button>
+                    </div>
                     <div class="brand">
                         <div class="header-main-title">Alexi, an Alex Chatbot</div>
-                        <div class="header-subtle">Your AI assistant</div>
                     </div>
-                    <button id="new-chat-btn">+ New Chat</button>
+                    <button id="new-chat-btn" class="app-btn primary-btn large">+ New Chat</button>
                 </div>
 
                 <div class="header-center">
                     <div class="header-sub">Chatting as</div>
-                    <div id="current-user-wrap"><span id="current-user-display"></span><button id="change-user-btn" title="Change user">Change</button></div>
+                    <div id="current-user-wrap"><span id="current-user-display"></span><button id="change-user-btn" class="app-btn" title="Change user">Change</button></div>
                 </div>
 
                 <div class="header-right">
-                    <button id="settings-btn" title="Settings">⚙️</button>
+                    <button id="settings-btn" class="app-btn icon-btn" title="Settings" aria-label="Settings">⚙️</button>
                 </div>
                     <div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px;">
                     <div id="token-usage">In: - | Out: -</div>
@@ -811,8 +828,8 @@
                     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
                         <h3 style="margin:0;color:#075e54">Settings</h3>
                         <div style="display:flex;gap:8px;align-items:center;">
-                            <button id="settings-apply-btn" style="background:#25d366;color:#fff;border:0;padding:8px 12px;border-radius:8px;cursor:pointer;font-weight:600">Apply</button>
-                            <button id="settings-close-btn" style="background:transparent;border:0;font-size:18px;cursor:pointer" title="Close">✕</button>
+                            <button id="settings-apply-btn" class="app-btn primary-btn large">Apply</button>
+                            <button id="settings-close-btn" class="app-btn icon-btn" title="Close" aria-label="Close settings">✕</button>
                         </div>
                     </div>
                     <div style="padding-top:8px;">
@@ -846,7 +863,7 @@
                     placeholder="Type a message..." 
                     autocomplete="off"
                 >
-                <button id="send-btn" aria-label="Send message">➤</button>
+                <button id="send-btn" class="app-btn icon-btn" aria-label="Send message">➤</button>
             </div>
         </div>
     </div>
