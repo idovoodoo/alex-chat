@@ -173,6 +173,13 @@
         #header-title {
             flex: 1;
         }
+        #alex-avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            object-fit: cover;
+            border: 2px solid rgba(255,255,255,0.12);
+        }
 
         #chat-container {
             flex: 1;
@@ -622,6 +629,7 @@
                     <button id="change-user-btn" title="Change user">Change</button>
                 </div>
                 <div style="display:flex;align-items:center;gap:8px;margin-left:8px;">
+                    <img id="alex-avatar" src="/static/images/alex-profile.webp" alt="Alex profile photo" width="40" height="40" />
                     <button id="new-chat-btn">+ New Chat</button>
                 </div>
                 <div id="model-selector-container">

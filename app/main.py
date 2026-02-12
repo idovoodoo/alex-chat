@@ -1327,6 +1327,11 @@ _STATIC_DIR = os.path.join(_REPO_ROOT, "static")
 if os.path.isdir(_STATIC_DIR):
     app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
+# Mount a developer images directory (so we can serve images placed in dev/images)
+_IMAGES_DIR = os.path.join(_REPO_ROOT, "dev", "images")
+if os.path.isdir(_IMAGES_DIR):
+    app.mount("/images", StaticFiles(directory=_IMAGES_DIR), name="images")
+
 # Directory where server-side chat logs are stored (safe, controlled)
 CHAT_LOGS_DIR = os.path.join(_REPO_ROOT, "dev", "chat_logs")
 
