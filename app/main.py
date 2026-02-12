@@ -2025,6 +2025,17 @@ def new_chat(data: NewChatIn):
                 }
                 LAST_NEW_CHAT_DEBUG["saved_lines"] = saved_lines
                 LAST_NEW_CHAT_DEBUG["skipped_duplicates"] = skipped_duplicates
+                # Build a DB summary for frontend diagnostics
+                try:
+                    db_summary = {
+                        "db_connected": bool(DB_CONN is not None),
+                        "saved_lines": int(len(saved_lines)),
+                        "skipped_duplicates": int(len(skipped_duplicates)),
+                        "db_last_error": DB_LAST_ERROR,
+                    }
+                except Exception:
+                    db_summary = None
+                LAST_NEW_CHAT_DEBUG["db_summary"] = db_summary
                 try:
                     _log_debug_to_console("new_chat_saved_lines")
                 except Exception:
@@ -2104,6 +2115,11 @@ def new_chat(data: NewChatIn):
                         }
                         NEW_CHAT_PROGRESS[data.session_id] = st
                     st["token_summary"] = token_summary
+                    # include DB summary if available
+                    try:
+                        st["db_summary"] = LAST_NEW_CHAT_DEBUG.get("db_summary") if isinstance(LAST_NEW_CHAT_DEBUG, dict) else None
+                    except Exception:
+                        st["db_summary"] = None
                 except Exception:
                     pass
                 
@@ -2140,7 +2156,8 @@ def new_chat(data: NewChatIn):
             "summary_saved": summary_saved,
             "duplicate_detected": duplicate_detected,
             "extracted_memory": extracted_memory,
-            "token_summary": token_summary
+            "token_summary": token_summary,
+            "db_summary": LAST_NEW_CHAT_DEBUG.get("db_summary") if isinstance(LAST_NEW_CHAT_DEBUG, dict) else None
         }
     except Exception as e:
         logging.error(f"Error in new_chat: {type(e).__name__}: {e}")

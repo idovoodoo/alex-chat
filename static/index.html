@@ -1233,6 +1233,14 @@
                                         } else {
                                             appLog('token', 'No token summary found in state');
                                         }
+                                        // Log DB summary if provided by the server
+                                        if (state.db_summary) {
+                                            try {
+                                                appLog('db', '=== DB SUMMARY ===', state.db_summary);
+                                            } catch (e) {}
+                                        } else {
+                                            try { appLog('db', 'No DB summary found in state'); } catch (e) {}
+                                        }
                                         
                                         setTimeout(() => {
                                             progressModal.classList.add('hidden');
