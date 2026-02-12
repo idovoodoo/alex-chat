@@ -333,23 +333,32 @@
             overscroll-behavior: contain; /* Prevent pull-to-refresh on chat */
         }
 
-        /* Snackbar shown when chat gets too long */
+        /* Snackbar shown when chat gets too long (centered and fades out) */
         #snackbar {
-            position: absolute;
+            position: fixed;
             left: 50%;
-            transform: translateX(-50%);
-            top: 10px;
+            top: 50%;
+            transform: translate(-50%, -50%) scale(0.98);
             background: rgba(0,0,0,0.85);
             color: white;
-            padding: 10px 16px;
-            border-radius: 8px;
-            z-index: 4000;
+            padding: 12px 18px;
+            border-radius: 10px;
+            z-index: 6000;
             display: none;
-            box-shadow: 0 6px 20px rgba(0,0,0,0.2);
-            font-weight: 600;
-            font-size: 14px;
+            box-shadow: 0 8px 30px rgba(0,0,0,0.3);
+            font-weight: 700;
+            font-size: 15px;
+            opacity: 0;
+            transition: opacity 0.4s ease, transform 0.25s ease;
+            pointer-events: none;
+            max-width: 90%;
+            text-align: center;
         }
-        #snackbar.show { display: block; animation: slideDown 0.25s ease; }
+        #snackbar.show {
+            display: block;
+            opacity: 1;
+            transform: translate(-50%, -50%) scale(1);
+        }
 
         .message {
             max-width: 75%;
@@ -1131,6 +1140,9 @@
 
         // Create a new chat locally (no server call)
         function createNewChatLocal() {
+            // Hide any snackbar warnings when starting a new chat
+            try { hideSnackbar(); } catch (e) {}
+
             const chatId = 'chat_' + Date.now();
             chats[chatId] = {
                 id: chatId,
@@ -1443,13 +1455,24 @@
 
         // Snackbar helper
         let _snackTimer = null;
-        function showSnackbar(msg, duration = 6000) {
+        function hideSnackbar() {
+            const el = document.getElementById('snackbar');
+            if (!el) return;
+            el.classList.remove('show');
+            if (_snackTimer) {
+                clearTimeout(_snackTimer);
+                _snackTimer = null;
+            }
+        }
+
+        function showSnackbar(msg, duration = 3000) {
             const el = document.getElementById('snackbar');
             if (!el) return;
             el.textContent = msg;
             el.classList.add('show');
             if (_snackTimer) clearTimeout(_snackTimer);
             _snackTimer = setTimeout(() => {
+                // remove 'show' which triggers CSS fade-out
                 el.classList.remove('show');
                 _snackTimer = null;
             }, duration);

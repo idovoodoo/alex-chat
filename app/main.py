@@ -132,6 +132,8 @@ MEMORIES = None
 CORE_MEMORY_TEXTS: list[str] | None = None
 CORE_MEMORY_EMBEDDINGS: np.ndarray | None = None  # shape (n, d), row-normalized
 CORE_MEMORY_EMBEDDINGS_ERROR: str | None = None
+LIFE_MEMORY_TEXTS: list[str] | None = None
+LIFE_MEMORY_EMBEDDINGS: np.ndarray | None = None  # shape (n, d), row-normalized
 DB_CONN = None
 DB_LAST_ERROR = None
 LAST_LIFE_RECALL = None
@@ -219,6 +221,13 @@ def _load_rag_assets():
         _build_core_memory_embeddings()
     except Exception:
         # Never crash startup due to memory embedding.
+        pass
+
+    # Build in-memory similarity index for life memories (best-effort)
+    try:
+        _build_life_memory_embeddings()
+    except Exception:
+        # Never crash startup due to life memory embedding.
         pass
 
 
@@ -520,6 +529,70 @@ def _build_core_memory_embeddings() -> None:
         logging.exception("Failed to build core memory embeddings")
 
 
+def _build_life_memory_embeddings() -> None:
+    """Build a row-normalized embedding matrix for life memories (type='life').
+
+    This is called at startup and after /new_chat to cache embeddings for duplicate checking.
+    Query-time duplicate checking embeds only the new memory and does cosine similarity.
+    """
+    global LIFE_MEMORY_TEXTS, LIFE_MEMORY_EMBEDDINGS
+
+    LIFE_MEMORY_TEXTS = None
+    LIFE_MEMORY_EMBEDDINGS = None
+
+    if not _ensure_db_connection():
+        logging.warning("Cannot build life memory embeddings: DB connection unavailable")
+        return
+
+    try:
+        with DB_CONN.cursor() as cur:
+            cur.execute("SELECT content FROM memories WHERE type = 'life' ORDER BY id")
+            rows = cur.fetchall()
+        
+        memory_texts: list[str] = [row[0].strip() for row in rows if row[0] and row[0].strip()]
+        
+        if not memory_texts:
+            LIFE_MEMORY_TEXTS = []
+            LIFE_MEMORY_EMBEDDINGS = None
+            logging.info("No life memories to embed")
+            return
+
+        vectors: list[np.ndarray] = []
+        kept_texts: list[str] = []
+        expected_d: int | None = None
+
+        for m in memory_texts:
+            try:
+                v, _tok = _embed_text(m)
+                if v.ndim != 1:
+                    continue
+                if expected_d is None:
+                    expected_d = int(v.shape[0])
+                elif int(v.shape[0]) != expected_d:
+                    continue
+                n = float(np.linalg.norm(v))
+                if n <= 0:
+                    continue
+                vectors.append((v / n).astype(np.float32))
+                kept_texts.append(m)
+            except Exception:
+                # Best-effort: skip individual failures.
+                continue
+
+        if not vectors:
+            LIFE_MEMORY_TEXTS = []
+            LIFE_MEMORY_EMBEDDINGS = None
+            return
+
+        LIFE_MEMORY_TEXTS = kept_texts
+        LIFE_MEMORY_EMBEDDINGS = np.vstack(vectors).astype(np.float32)
+        logging.info(f"Embedded {len(kept_texts)} life memories for duplicate checking")
+    except Exception as e:
+        LIFE_MEMORY_TEXTS = []
+        LIFE_MEMORY_EMBEDDINGS = None
+        logging.exception(f"Failed to build life memory embeddings: {type(e).__name__}: {e}")
+
+
 def _retrieve_top_chunks(query: str, k: int = 2) -> tuple[list[str], int]:
     """Returns (results, tokens_used_by_embedding).
 
@@ -589,9 +662,9 @@ def _select_memories(query: str, k: int = 5) -> list[str]:
     try:
         k_int = int(k)
     except Exception:
-        k_int = 3
-    # Requirement: inject only the top 1–3 relevant memories
-    k_int = max(1, min(3, k_int))
+        k_int = 6
+    # Requirement: inject only the top 1–6 relevant memories
+    k_int = max(1, min(6, k_int))
 
     n = int(CORE_MEMORY_EMBEDDINGS.shape[0])
     if n <= 0:
@@ -763,129 +836,93 @@ def _message_suggests_recall(message: str) -> bool:
 
 
 def _search_life_memories(message: str, limit: int = 6) -> list[str]:
-    """Simple keyword search against memories table WHERE type='life'."""
+    """Semantic search against life memories using pre-computed embeddings.
+    
+    Embeds the user message and retrieves the top matches from the cached
+    life memory embedding matrix (similar to core memory selection).
+    """
     global LIFE_RECALL_DEBUG
     
     if LIFE_RECALL_DEBUG is None:
         LIFE_RECALL_DEBUG = {}
     
-    if not _ensure_db_connection():
-        LIFE_RECALL_DEBUG["error"] = "DB connection unavailable"
-        logging.warning("Life memory search skipped: DB connection unavailable")
-        return []
     if not isinstance(message, str) or not message.strip():
         LIFE_RECALL_DEBUG["error"] = "empty message"
         logging.warning("Life memory search skipped: empty message")
         return []
     
-    LIFE_RECALL_DEBUG["search_message"] = message[:100]
-    logging.info(f"Starting life memory search for message: {message[:100]}...")
-
-    # Extract a few meaningful keywords from the message.
-    tokens = [t.lower() for t in re.findall(r"[a-zA-Z0-9']+", message)]
-    stop = {
-        "a",
-        "an",
-        "and",
-        "are",
-        "as",
-        "at",
-        "be",
-        "but",
-        "by",
-        "do",
-        "did",
-        "does",
-        "for",
-        "from",
-        "had",
-        "has",
-        "have",
-        "how",
-        "i",
-        "i'm",
-        "im",
-        "in",
-        "is",
-        "it",
-        "like",
-        "me",
-        "my",
-        "of",
-        "on",
-        "or",
-        "our",
-        "so",
-        "that",
-        "the",
-        "their",
-        "then",
-        "there",
-        "they",
-        "this",
-        "to",
-        "us",
-        "was",
-        "we",
-        "were",
-        "what",
-        "when",
-        "where",
-        "who",
-        "why",
-        "with",
-        "you",
-        "your",
-        "remember",
-        "remind",
-        "trip",
-        "school",
-        "back",
-        "time",
-        "used",
-    }
-
-    keywords: list[str] = []
-    seen: set[str] = set()
-    for t in tokens:
-        if len(t) < 4:
-            continue
-        if t in stop:
-            continue
-        if t in seen:
-            continue
-        seen.add(t)
-        keywords.append(t)
-        if len(keywords) >= 6:
-            break
-
-    if not keywords:
-        LIFE_RECALL_DEBUG["keywords"] = []
-        LIFE_RECALL_DEBUG["error"] = "no keywords extracted"
-        logging.info("Life memory search: no keywords extracted from message")
+    if LIFE_MEMORY_EMBEDDINGS is None or LIFE_MEMORY_TEXTS is None:
+        LIFE_RECALL_DEBUG["error"] = "life memory embeddings not available"
+        logging.warning("Life memory search skipped: embeddings not built")
         return []
-
-    LIFE_RECALL_DEBUG["keywords"] = keywords
-    logging.info(f"Life memory search keywords: {keywords}")
-    clauses = " OR ".join(["content ILIKE %s"] * len(keywords))
-    params = [f"%{k}%" for k in keywords]
-
+    
+    if not LIFE_MEMORY_TEXTS:
+        LIFE_RECALL_DEBUG["error"] = "no life memories available"
+        return []
+    
+    LIFE_RECALL_DEBUG["search_message"] = message[:100]
+    logging.info(f"Starting semantic life memory search for message: {message[:100]}...")
+    
     try:
-        with DB_CONN.cursor() as cur:
-            query = f"SELECT content FROM memories WHERE type = 'life' AND ({clauses}) LIMIT %s"
-            LIFE_RECALL_DEBUG["sql_query"] = query
-            LIFE_RECALL_DEBUG["sql_params"] = params
-            logging.info(f"Executing life memory query with {len(keywords)} keywords, limit={limit}")
-            cur.execute(query, (*params, int(limit)))
-            rows = cur.fetchall()
-        results = [r[0] for r in rows if r and isinstance(r[0], str) and r[0].strip()]
-        LIFE_RECALL_DEBUG["results_count"] = len(results)
-        LIFE_RECALL_DEBUG["results_preview"] = [r[:100] + "..." if len(r) > 100 else r for r in results[:3]]
-        logging.info(f"Life memory search returned {len(results)} results")
-        return results
+        k_int = int(limit)
+    except Exception:
+        k_int = 6
+    k_int = max(1, min(6, k_int))
+    
+    n = int(LIFE_MEMORY_EMBEDDINGS.shape[0])
+    if n <= 0:
+        return []
+    
+    try:
+        # Embed the user message
+        q, _tok = _embed_text(message)
+        qn = float(np.linalg.norm(q))
+        if qn <= 0:
+            return []
+        q_unit = (q / qn).astype(np.float32)
+        
+        # Cosine similarity via matrix multiply
+        sims = LIFE_MEMORY_EMBEDDINGS @ q_unit
+        k0 = min(k_int, n)
+        
+        top_idx = np.argpartition(-sims, range(k0))[:k0]
+        top_idx = top_idx[np.argsort(-sims[top_idx])]
+        
+        best = float(sims[int(top_idx[0])])
+        
+        # Conservative similarity threshold (similar to core memories)
+        abs_min = 0.22
+        if best < abs_min:
+            LIFE_RECALL_DEBUG["error"] = f"best similarity {best:.3f} below threshold {abs_min}"
+            logging.info(f"Life memory search: no results above threshold (best={best:.3f})")
+            return []
+        
+        rel_gate = max(abs_min, best * 0.85)
+        
+        picked: list[str] = []
+        for i in top_idx.tolist():
+            s = float(sims[int(i)])
+            if s < rel_gate:
+                continue
+            if 0 <= int(i) < len(LIFE_MEMORY_TEXTS):
+                picked.append(LIFE_MEMORY_TEXTS[int(i)])
+            if len(picked) >= k_int:
+                break
+        
+        LIFE_RECALL_DEBUG["results_count"] = len(picked)
+        LIFE_RECALL_DEBUG["results_preview"] = [r[:100] + "..." if len(r) > 100 else r for r in picked[:3]]
+        LIFE_RECALL_DEBUG["best_similarity"] = best
+        LIFE_RECALL_DEBUG["threshold"] = rel_gate
+        
+        if picked:
+            logging.info(f"Life memories selected: count={len(picked)} best_sim={best:.3f} gate={rel_gate:.3f}")
+        else:
+            logging.info(f"Life memories selected: none (best_sim={best:.3f} < gate={rel_gate:.3f})")
+        
+        return picked
     except Exception as e:
         LIFE_RECALL_DEBUG["error"] = f"{type(e).__name__}: {e}"
-        logging.error(f"Life memory search failed: {type(e).__name__}: {e}")
+        logging.error(f"Life memory semantic search failed: {type(e).__name__}: {e}")
         return []
 
 
@@ -1177,7 +1214,7 @@ def _get_tags_for_candidates(candidate_lines: list[str]) -> dict:
 
 
 def _check_duplicate_memory(new_memory: str, threshold: float = 0.85, check_life_memories: bool = True) -> bool:
-    """Check if a memory is a duplicate using cosine similarity.
+    """Check if a memory is a duplicate using cosine similarity (pre-computed embeddings).
     
     Args:
         new_memory: The memory text to check
@@ -1190,56 +1227,70 @@ def _check_duplicate_memory(new_memory: str, threshold: float = 0.85, check_life
     if not new_memory or not new_memory.strip():
         return True  # Empty memory is considered duplicate
     
-    # Get memory cache
     if check_life_memories:
-        # Query life memories from database
+        # Use pre-computed life memory embeddings (90%+ token reduction)
+        if LIFE_MEMORY_EMBEDDINGS is None or LIFE_MEMORY_TEXTS is None or len(LIFE_MEMORY_TEXTS) == 0:
+            return False  # No existing memories, so not a duplicate
+        
         try:
-            if _ensure_db_connection():
-                with DB_CONN.cursor() as cur:
-                    cur.execute("SELECT content FROM memories WHERE type = 'life' ORDER BY id")
-                    rows = cur.fetchall()
-                    memory_cache = [row[0] for row in rows if row[0]]
-            else:
-                memory_cache = []
-        except Exception:
-            memory_cache = []
-    else:
-        memory_cache = MEMORIES
-    
-    if not memory_cache or not isinstance(memory_cache, list) or len(memory_cache) == 0:
-        return False  # No existing memories, so not a duplicate
-    
-    try:
-        # Generate embedding for new memory
-        new_embedding, _ = _embed_text(new_memory)
-        
-        # Compare against all existing memories
-        for existing_memory in memory_cache:
-            if not existing_memory or not isinstance(existing_memory, str):
-                continue
+            # Embed new memory (SINGLE API call)
+            new_vec, _ = _embed_text(new_memory)
+            norm = float(np.linalg.norm(new_vec))
+            if norm <= 0:
+                return False
             
-            # Generate embedding for existing memory
-            existing_embedding, _ = _embed_text(existing_memory)
+            new_unit = (new_vec / norm).astype(np.float32)
             
-            # Calculate cosine similarity
-            dot_product = np.dot(new_embedding, existing_embedding)
-            norm_new = np.linalg.norm(new_embedding)
-            norm_existing = np.linalg.norm(existing_embedding)
+            # Matrix multiply: O(1) operation after pre-computation
+            sims = LIFE_MEMORY_EMBEDDINGS @ new_unit
             
-            if norm_new == 0 or norm_existing == 0:
-                continue
+            max_sim = float(sims.max())
             
-            similarity = dot_product / (norm_new * norm_existing)
-            
-            # Check if above threshold
-            if similarity > threshold:
-                logging.info(f"Duplicate memory detected (similarity: {similarity:.3f})")
+            if max_sim > threshold:
+                logging.info(f"Duplicate life memory detected (similarity: {max_sim:.3f})")
                 return True
+            
+            return False
+        except Exception as e:
+            logging.error(f"Error checking duplicate life memory: {type(e).__name__}: {e}")
+            return False  # On error, proceed with insert to avoid data loss
+    else:
+        # Check against core memories (MEMORIES)
+        memory_cache = MEMORIES
+        if not memory_cache or not isinstance(memory_cache, list) or len(memory_cache) == 0:
+            return False
         
-        return False
-    except Exception as e:
-        logging.error(f"Error checking duplicate memory: {type(e).__name__}: {e}")
-        return False  # On error, proceed with insert to avoid data loss
+        try:
+            # Generate embedding for new memory
+            new_embedding, _ = _embed_text(new_memory)
+            
+            # Compare against all existing memories
+            for existing_memory in memory_cache:
+                if not existing_memory or not isinstance(existing_memory, str):
+                    continue
+                
+                # Generate embedding for existing memory
+                existing_embedding, _ = _embed_text(existing_memory)
+                
+                # Calculate cosine similarity
+                dot_product = np.dot(new_embedding, existing_embedding)
+                norm_new = np.linalg.norm(new_embedding)
+                norm_existing = np.linalg.norm(existing_embedding)
+                
+                if norm_new == 0 or norm_existing == 0:
+                    continue
+                
+                similarity = dot_product / (norm_new * norm_existing)
+                
+                # Check if above threshold
+                if similarity > threshold:
+                    logging.info(f"Duplicate core memory detected (similarity: {similarity:.3f})")
+                    return True
+            
+            return False
+        except Exception as e:
+            logging.error(f"Error checking duplicate core memory: {type(e).__name__}: {e}")
+            return False
 
 
 def _save_memory(memory_line: str):
@@ -1315,6 +1366,32 @@ def _save_life_memory(memory_line: str, tags: list[str] | None = None):
                         cur.execute("INSERT INTO memories (content, type) VALUES (%s, %s)", (mem, 'life'))
             DB_CONN.commit()
             logging.info(f"Saved {len(new_memories)} life memories to database (committed)")
+
+            # Incrementally append new embeddings to in-memory cache (avoid full rebuild)
+            try:
+                global LIFE_MEMORY_TEXTS, LIFE_MEMORY_EMBEDDINGS
+                if LIFE_MEMORY_TEXTS is None:
+                    LIFE_MEMORY_TEXTS = []
+                    LIFE_MEMORY_EMBEDDINGS = None
+
+                for mem in new_memories:
+                    try:
+                        vec, _tok = _embed_text(mem)
+                        norm = float(np.linalg.norm(vec))
+                        if norm <= 0:
+                            continue
+                        v_norm = (vec / norm).astype(np.float32)
+                        if LIFE_MEMORY_EMBEDDINGS is None:
+                            LIFE_MEMORY_EMBEDDINGS = np.expand_dims(v_norm, axis=0)
+                            LIFE_MEMORY_TEXTS = [mem]
+                        else:
+                            LIFE_MEMORY_EMBEDDINGS = np.vstack([LIFE_MEMORY_EMBEDDINGS, v_norm])
+                            LIFE_MEMORY_TEXTS.append(mem)
+                    except Exception:
+                        continue
+                logging.info(f"Updated life memory cache with {len(new_memories)} new embedding(s)")
+            except Exception as e:
+                logging.error(f"Failed to update life memory cache: {type(e).__name__}: {e}")
 
             if isinstance(LAST_NEW_CHAT_DEBUG, dict):
                 LAST_NEW_CHAT_DEBUG["db_insert_count"] = len(new_memories)
@@ -1415,7 +1492,7 @@ def chat(data: ChatIn):
 
         examples = []
         try:
-            examples, retrieval_tokens = _retrieve_top_chunks(data.message, k=2)
+            examples, retrieval_tokens = _retrieve_top_chunks(data.message, k=3)
             if retrieval_tokens:
                 token_calls.append({
                     "name": "retrieval_embedding",
@@ -1431,15 +1508,15 @@ def chat(data: ChatIn):
         # a few style examples to keep the response firmly in-chat-log style.
         if not examples and isinstance(RAG_CHUNKS, list) and len(RAG_CHUNKS) > 0:
             start = abs(hash(data.message)) % len(RAG_CHUNKS)
-            for j in range(2):
+            for j in range(3):
                 chunk = RAG_CHUNKS[(start + j) % len(RAG_CHUNKS)]
                 if isinstance(chunk, str) and chunk.strip():
                     examples.append(chunk.strip())
-                if len(examples) >= 2:
+                if len(examples) >= 3:
                     break
 
-        # Get memories to inject into prompt (top 1–3, relevant only)
-        memories = _select_memories(data.message, k=3)
+        # Get memories to inject into prompt (top 1–6, relevant only)
+        memories = _select_memories(data.message, k=6)
 
         # Optional: retrieve life memories only when the message suggests recall or is a past factual question
         life_memories: list[str] = []
@@ -1962,6 +2039,16 @@ def new_chat(data: NewChatIn):
                     pass
         else:
             LAST_NEW_CHAT_DEBUG["note"] = "no session history"
+        
+        # Rebuild life memory embeddings cache (resync with DB)
+        try:
+            NEW_CHAT_PROGRESS[data.session_id]["status"] = "rebuilding_cache"
+            NEW_CHAT_PROGRESS[data.session_id]["progress"] = 85
+            NEW_CHAT_PROGRESS[data.session_id]["message"] = "resyncing life memory cache"
+            _build_life_memory_embeddings()
+            logging.info("Life memory cache rebuilt after /new_chat")
+        except Exception as e:
+            logging.error(f"Failed to rebuild life memory cache: {type(e).__name__}: {e}")
         
         # Clear the conversation history for this session
         if data.session_id in CONVERSATION_HISTORY:
