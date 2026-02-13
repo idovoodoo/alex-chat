@@ -232,6 +232,47 @@ USER_NAME_BY_SESSION = {}  # Track user_name for pronoun replacement in memories
 SESSION_TOKEN_LOGS: dict = {}
 
 
+# ===========================================================================================
+# CONFIGURATION: Retrieval and Memory Injection Settings
+# ===========================================================================================
+# These parameters control how many memories/chunks are retrieved and injected into prompts,
+# and the similarity thresholds used to filter relevant results.
+
+# --- RAG (Retrieval-Augmented Generation) Configuration ---
+# Controls style example retrieval from chat log chunks via FAISS semantic search
+RAG_CHUNKS_TO_RETRIEVE = 3          # Number of chat log chunks to retrieve for style examples
+RAG_FALLBACK_EXAMPLES = 3            # Number of random chunks to use when retrieval fails
+RAG_CHUNK_MAX_LINES = 4              # Max lines to keep from each chunk (keeps most recent exchanges)
+
+# --- Core Memory Configuration ---
+# Controls factual memory injection (e.g., "Alex lives in Birmingham", "Alex's dad is Steve")
+CORE_MEMORY_MAX_INJECT = 6           # Maximum core memories to inject into prompt
+CORE_MEMORY_MIN_SIMILARITY = 0.22    # Absolute minimum cosine similarity to consider relevant
+CORE_MEMORY_RELATIVE_GATE = 0.85     # Relative threshold: keep results >= (best_score * this value)
+
+# --- Life Memory Configuration: Recall Mode ---
+# Explicit recall triggers (e.g., "remember when", past factual questions)
+# Retrieves detailed episodic memories with moderate filtering
+LIFE_RECALL_MAX_INJECT = 6           # Maximum life memories for recall-triggered queries
+LIFE_RECALL_MIN_SIMILARITY = 0.22    # Absolute minimum similarity threshold for recall mode
+LIFE_RECALL_RELATIVE_GATE = 0.85     # Relative threshold: keep results >= (best_score * this value)
+
+# --- Life Memory Configuration: Contextual Mode ---
+# Passive background injection on every message (when recall mode doesn't trigger)
+# Uses strict filtering to minimize prompt bloat and only inject highly relevant memories
+LIFE_CONTEXTUAL_MAX_INJECT = 2       # Maximum life memories for passive contextual injection
+LIFE_CONTEXTUAL_MIN_SIMILARITY = 0.35  # Stricter threshold for contextual mode (vs 0.22 for recall)
+
+# --- Duplicate Detection Configuration ---
+# Controls similarity threshold for detecting duplicate memories before insertion
+DUPLICATE_SIMILARITY_THRESHOLD = 0.85  # Cosine similarity above which memories are considered duplicates
+
+# --- Debug and Logging Configuration ---
+DEBUG_CONSOLE_TRUNCATE_LIMIT = 16000  # Max characters for debug console output before truncation
+
+# ===========================================================================================
+
+
 @app.on_event("startup")
 def _load_rag_assets():
     global RAG_INDEX, RAG_CHUNKS, RAG_ERROR, MEMORIES, DB_CONN
@@ -744,7 +785,7 @@ def _build_life_memory_embeddings() -> None:
         logging.exception(f"Failed to build life memory embeddings: {type(e).__name__}: {e}")
 
 
-def _retrieve_top_chunks(query: str, k: int = 2) -> tuple[list[str], int]:
+def _retrieve_top_chunks(query: str, k: int = RAG_CHUNKS_TO_RETRIEVE) -> tuple[list[str], int]:
     """Returns (results, tokens_used_by_embedding).
 
     If FAISS or chunks aren't available returns ([], 0).
@@ -787,8 +828,8 @@ def _log_debug_to_console(tag: str = "") -> None:
             "core_memory_embeddings_count": int(len(CORE_MEMORY_TEXTS) if isinstance(CORE_MEMORY_TEXTS, list) else 0),
         }
         s = json.dumps(payload, ensure_ascii=False, default=str)
-        if len(s) > 16000:
-            s = s[:16000] + "…(truncated)"
+        if len(s) > DEBUG_CONSOLE_TRUNCATE_LIMIT:
+            s = s[:DEBUG_CONSOLE_TRUNCATE_LIMIT] + "…(truncated)"
         # Store the latest debug console payload in-memory so the frontend
         # can fetch and print it to the browser console. Do NOT log to server.
         try:
@@ -800,7 +841,7 @@ def _log_debug_to_console(tag: str = "") -> None:
         logging.exception("DEBUG_CONSOLE: failed to serialize debug state")
 
 
-def _select_memories(query: str, k: int = 5) -> list[str]:
+def _select_memories(query: str, k: int = CORE_MEMORY_MAX_INJECT) -> list[str]:
     """Return up to k *relevant* core memories by embedding similarity.
 
     Embeds the user message on each call, then retrieves the top matches from
@@ -843,11 +884,11 @@ def _select_memories(query: str, k: int = 5) -> list[str]:
     best = float(sims[int(top_idx[0])])
 
     # Conservative filters to avoid unrelated injections.
-    abs_min = 0.22
+    abs_min = CORE_MEMORY_MIN_SIMILARITY
     if best < abs_min:
         return []
 
-    rel_gate = max(abs_min, best * 0.85)
+    rel_gate = max(abs_min, best * CORE_MEMORY_RELATIVE_GATE)
 
     picked: list[str] = []
     for i in top_idx.tolist():
@@ -992,7 +1033,7 @@ def _message_suggests_recall(message: str) -> bool:
     return triggered
 
 
-def _search_life_memories(message: str, limit: int = 6, threshold: float = 0.22) -> list[str]:
+def _search_life_memories(message: str, limit: int = LIFE_RECALL_MAX_INJECT, threshold: float = LIFE_RECALL_MIN_SIMILARITY) -> list[str]:
     """Semantic search against life memories using pre-computed embeddings.
     
     Embeds the user message and retrieves the top matches from the cached
@@ -1001,7 +1042,7 @@ def _search_life_memories(message: str, limit: int = 6, threshold: float = 0.22)
     Args:
         message: The user message to search against
         limit: Maximum number of memories to return (1-6)
-        threshold: Minimum similarity threshold (default 0.22)
+        threshold: Minimum similarity threshold
     """
     global LIFE_RECALL_DEBUG
     
@@ -1059,7 +1100,7 @@ def _search_life_memories(message: str, limit: int = 6, threshold: float = 0.22)
             logging.info(f"Life memory search: no results above threshold (best={best:.3f})")
             return []
         
-        rel_gate = max(abs_min, best * 0.85)
+        rel_gate = max(abs_min, best * LIFE_RECALL_RELATIVE_GATE)
         
         picked: list[str] = []
         for i in top_idx.tolist():
@@ -1375,12 +1416,12 @@ def _get_tags_for_candidates(candidate_lines: list[str]) -> dict:
         return {}
 
 
-def _check_duplicate_memory(new_memory: str, threshold: float = 0.85, check_life_memories: bool = True) -> bool:
+def _check_duplicate_memory(new_memory: str, threshold: float = DUPLICATE_SIMILARITY_THRESHOLD, check_life_memories: bool = True) -> bool:
     """Check if a memory is a duplicate using normalized hash first, then cosine similarity.
     
     Args:
         new_memory: The memory text to check
-        threshold: Cosine similarity threshold (default 0.85)
+        threshold: Cosine similarity threshold
         check_life_memories: If True, check against life memories; if False, check against MEMORIES
     
     Returns:
@@ -1598,7 +1639,7 @@ def _save_life_memory(memory_line: str):
             LAST_NEW_CHAT_DEBUG["save_life_memory_error"] = f"{type(e).__name__}: {e}"
 
 
-def _trim_chunk_for_prompt(chunk: str, max_lines: int = 4) -> str:
+def _trim_chunk_for_prompt(chunk: str, max_lines: int = RAG_CHUNK_MAX_LINES) -> str:
     """Trim a RAG chunk to its last `max_lines` lines, but ensure Alex's most recent messages are preserved.
 
     If the last `max_lines` lines already contain an `Alex:` line, return them unchanged.
@@ -1684,7 +1725,7 @@ def chat(data: ChatIn):
 
         examples = []
         try:
-            examples, retrieval_tokens = _retrieve_top_chunks(data.message, k=3)
+            examples, retrieval_tokens = _retrieve_top_chunks(data.message, k=RAG_CHUNKS_TO_RETRIEVE)
             if retrieval_tokens:
                 token_calls.append({
                     "name": "retrieval_embedding",
@@ -1700,15 +1741,15 @@ def chat(data: ChatIn):
         # a few style examples to keep the response firmly in-chat-log style.
         if not examples and isinstance(RAG_CHUNKS, list) and len(RAG_CHUNKS) > 0:
             start = abs(hash(data.message)) % len(RAG_CHUNKS)
-            for j in range(3):
+            for j in range(RAG_FALLBACK_EXAMPLES):
                 chunk = RAG_CHUNKS[(start + j) % len(RAG_CHUNKS)]
                 if isinstance(chunk, str) and chunk.strip():
                     examples.append(chunk.strip())
-                if len(examples) >= 3:
+                if len(examples) >= RAG_FALLBACK_EXAMPLES:
                     break
 
         # Get memories to inject into prompt (top 1–6, relevant only)
-        memories = _select_memories(data.message, k=6)
+        memories = _select_memories(data.message, k=CORE_MEMORY_MAX_INJECT)
 
         # Optional: retrieve life memories only when the message suggests recall or is a past factual question
         life_memories: list[str] = []
@@ -1733,7 +1774,7 @@ def chat(data: ChatIn):
         
         try:
             if suggests_recall or is_past_q or is_remember:
-                life_memories = _search_life_memories(data.message, limit=6)
+                life_memories = _search_life_memories(data.message, limit=LIFE_RECALL_MAX_INJECT)
                 LIFE_RECALL_DEBUG["search_executed"] = True
                 LIFE_RECALL_DEBUG["results_count"] = len(life_memories)
                 logging.info(f"Life memories retrieved: {len(life_memories)} items")
@@ -1765,7 +1806,11 @@ def chat(data: ChatIn):
         # Uses stricter threshold (0.35) and injects at most 1-2 memories for minimal prompt impact
         if not life_memories:
             try:
-                contextual_memories = _search_life_memories(data.message, limit=2, threshold=0.35)
+                contextual_memories = _search_life_memories(
+                    data.message, 
+                    limit=LIFE_CONTEXTUAL_MAX_INJECT, 
+                    threshold=LIFE_CONTEXTUAL_MIN_SIMILARITY
+                )
                 if contextual_memories:
                     life_memories = contextual_memories
                     LIFE_RECALL_DEBUG["contextual_mode"] = True
@@ -1874,7 +1919,7 @@ def chat(data: ChatIn):
 
         if examples:
             # Trim each retrieved/fallback chunk to its last few lines to avoid dilution
-            examples = [_trim_chunk_for_prompt(e, max_lines=4) for e in examples]
+            examples = [_trim_chunk_for_prompt(e, max_lines=RAG_CHUNK_MAX_LINES) for e in examples]
             joined = "\n\n---\n\n".join(examples)
             system_prompt += (
                 "\n\n"
@@ -2218,7 +2263,11 @@ def new_chat(data: NewChatIn):
                 total = len(candidate_lines)
                 for idx, line in enumerate(candidate_lines, start=1):
                     try:
-                        is_duplicate = _check_duplicate_memory(line, threshold=0.85, check_life_memories=True)
+                        is_duplicate = _check_duplicate_memory(
+                            line, 
+                            threshold=DUPLICATE_SIMILARITY_THRESHOLD, 
+                            check_life_memories=True
+                        )
                     except Exception:
                         is_duplicate = False
 
