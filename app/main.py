@@ -992,11 +992,16 @@ def _message_suggests_recall(message: str) -> bool:
     return triggered
 
 
-def _search_life_memories(message: str, limit: int = 6) -> list[str]:
+def _search_life_memories(message: str, limit: int = 6, threshold: float = 0.22) -> list[str]:
     """Semantic search against life memories using pre-computed embeddings.
     
     Embeds the user message and retrieves the top matches from the cached
     life memory embedding matrix (similar to core memory selection).
+    
+    Args:
+        message: The user message to search against
+        limit: Maximum number of memories to return (1-6)
+        threshold: Minimum similarity threshold (default 0.22)
     """
     global LIFE_RECALL_DEBUG
     
@@ -1047,8 +1052,8 @@ def _search_life_memories(message: str, limit: int = 6) -> list[str]:
         
         best = float(sims[int(top_idx[0])])
         
-        # Conservative similarity threshold (similar to core memories)
-        abs_min = 0.22
+        # Similarity threshold (configurable for different retrieval modes)
+        abs_min = float(threshold)
         if best < abs_min:
             LIFE_RECALL_DEBUG["error"] = f"best similarity {best:.3f} below threshold {abs_min}"
             logging.info(f"Life memory search: no results above threshold (best={best:.3f})")
@@ -1755,6 +1760,19 @@ def chat(data: ChatIn):
             }
         except Exception:
             LAST_LIFE_RECALL = None
+
+        # Contextual life-memory injection: runs on every message when recall wasn't triggered
+        # Uses stricter threshold (0.35) and injects at most 1-2 memories for minimal prompt impact
+        if not life_memories:
+            try:
+                contextual_memories = _search_life_memories(data.message, limit=2, threshold=0.35)
+                if contextual_memories:
+                    life_memories = contextual_memories
+                    LIFE_RECALL_DEBUG["contextual_mode"] = True
+                    LIFE_RECALL_DEBUG["contextual_count"] = len(contextual_memories)
+                    logging.info(f"Contextual life memories injected: {len(contextual_memories)} items")
+            except Exception as e:
+                logging.error(f"Contextual life memory retrieval error: {type(e).__name__}: {e}")
 
         # Check if this is a past factual question with no supporting memories
         is_past_question = _is_past_factual_question(data.message)
