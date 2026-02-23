@@ -900,6 +900,17 @@
                             </select>
                         </div>
                         <!-- Additional settings can go here -->
+
+                        <!-- Life Memory Cleanup -->
+                        <div id="memory-cleanup-section" style="margin-top:18px;border-top:1px solid #e0e0e0;padding-top:14px;">
+                            <div style="font-size:13px;font-weight:600;color:#075e54;margin-bottom:8px;">Life Memory Cleanup</div>
+                            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                                <button id="cleanup-propose-btn" class="app-btn primary-btn">Propose Cleanup</button>
+                                <button id="cleanup-apply-btn" class="app-btn primary-btn" disabled style="opacity:0.4;">Apply Cleanup</button>
+                                <button id="cleanup-restore-btn" class="app-btn" style="display:none;">Restore Backup</button>
+                            </div>
+                            <div id="cleanup-status" style="font-size:12px;color:#555;margin-top:8px;"></div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1064,6 +1075,123 @@
                 settingsPanel.classList.add('hidden');
             });
         }
+
+        // ---- Life Memory Cleanup ----
+        (function() {
+            const proposeBtn = document.getElementById('cleanup-propose-btn');
+            const applyBtn   = document.getElementById('cleanup-apply-btn');
+            const restoreBtn = document.getElementById('cleanup-restore-btn');
+            const statusEl   = document.getElementById('cleanup-status');
+            if (!proposeBtn) return;
+
+            let currentProposal = null;  // {proposed:[], summary:{}}
+
+            function setStatus(msg, color) {
+                statusEl.textContent = msg;
+                statusEl.style.color = color || '#555';
+            }
+
+            function getAdminToken() {
+                return localStorage.getItem('adminToken') || '';
+            }
+
+            function saveBackup(memories) {
+                const key = 'lifeMemoryBackup_' + new Date().toISOString();
+                const backups = JSON.parse(localStorage.getItem('lifeMemoryBackups') || '[]');
+                backups.unshift({ key, time: new Date().toISOString(), memories });
+                if (backups.length > 5) backups.length = 5;  // keep last 5
+                localStorage.setItem('lifeMemoryBackups', JSON.stringify(backups));
+                return key;
+            }
+
+            function updateRestoreBtn() {
+                const backups = JSON.parse(localStorage.getItem('lifeMemoryBackups') || '[]');
+                restoreBtn.style.display = backups.length ? 'inline-block' : 'none';
+            }
+            updateRestoreBtn();
+
+            proposeBtn.addEventListener('click', async () => {
+                proposeBtn.disabled = true;
+                applyBtn.disabled = true;
+                applyBtn.style.opacity = '0.4';
+                setStatus('Fetching and analysing memories…');
+                try {
+                    const token = getAdminToken();
+                    const url = (window.API_BASE || '') + '/admin/life_memories/propose'
+                        + (token ? '?x_admin_token=' + encodeURIComponent(token) : '');
+                    const res = await fetch(url, { method: 'POST' });
+                    if (!res.ok) {
+                        const err = await res.json().catch(() => ({ detail: res.statusText }));
+                        setStatus('Error: ' + (err.detail || res.statusText), '#c0392b');
+                        return;
+                    }
+                    const data = await res.json();
+                    // Save a backup of the original (we'll fetch the proposed as the "before")
+                    const beforeMemories = [];  // we don't have originals client-side; rely on server
+                    currentProposal = data;
+                    saveBackup(data.proposed);
+                    updateRestoreBtn();
+                    const s = data.summary || {};
+                    setStatus(
+                        `Proposal ready: ${s.before} → ${s.after} memories ` +
+                        `(merged: ${s.merged ?? '?'}, deleted: ${s.deleted ?? '?'}). ` +
+                        `Click "Apply Cleanup" to commit.`,
+                        '#075e54'
+                    );
+                    applyBtn.disabled = false;
+                    applyBtn.style.opacity = '1';
+                } catch (e) {
+                    setStatus('Network error: ' + e.message, '#c0392b');
+                } finally {
+                    proposeBtn.disabled = false;
+                }
+            });
+
+            applyBtn.addEventListener('click', async () => {
+                if (!currentProposal) return;
+                if (!confirm(`Apply cleanup? This will replace all life memories with ${currentProposal.proposed.length} entries. A backup is stored locally.`)) return;
+                applyBtn.disabled = true;
+                setStatus('Applying…');
+                try {
+                    const token = getAdminToken();
+                    const url = (window.API_BASE || '') + '/admin/life_memories/apply'
+                        + (token ? '?x_admin_token=' + encodeURIComponent(token) : '');
+                    const res = await fetch(url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ proposed: currentProposal.proposed })
+                    });
+                    if (!res.ok) {
+                        const err = await res.json().catch(() => ({ detail: res.statusText }));
+                        setStatus('Error: ' + (err.detail || res.statusText), '#c0392b');
+                        applyBtn.disabled = false;
+                        return;
+                    }
+                    const data = await res.json();
+                    setStatus(`Done. ${data.inserted} memories saved.`, '#075e54');
+                    currentProposal = null;
+                    applyBtn.disabled = true;
+                    applyBtn.style.opacity = '0.4';
+                } catch (e) {
+                    setStatus('Network error: ' + e.message, '#c0392b');
+                    applyBtn.disabled = false;
+                }
+            });
+
+            restoreBtn.addEventListener('click', () => {
+                const backups = JSON.parse(localStorage.getItem('lifeMemoryBackups') || '[]');
+                if (!backups.length) { setStatus('No backups found.', '#c0392b'); return; }
+                const latest = backups[0];
+                currentProposal = { proposed: latest.memories, summary: { before: '?', after: latest.memories.length, merged: 0, deleted: 0 } };
+                setStatus(
+                    `Backup loaded (${latest.memories.length} memories from ${latest.time.slice(0,19).replace('T',' ')}). ` +
+                    `Click "Apply Cleanup" to restore.`,
+                    '#e67e22'
+                );
+                applyBtn.disabled = false;
+                applyBtn.style.opacity = '1';
+            });
+        })();
 
         // Quick name selection
         window.selectQuickName = function(name) {

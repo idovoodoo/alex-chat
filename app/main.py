@@ -1160,13 +1160,18 @@ def _summarize_conversation(session_history: list, user_name: str = "User") -> s
     summary_prompt = (
         "Convert this chat into personal memory entries.\n\n"
         "Rules:\n"
-        "- Output 0 to 5 short factual sentences, EACH on its own line.\n"
-        "- Each sentence must be about the user, Alex, or someone in their lives.\n"
-        "- Each sentence must describe a DURABLE fact: preferences, traits, past experiences, future plans with dates, relationships, or ongoing situations.\n"
+        "- Output 0 to 2 memories, EACH on its own line. Maximum 3 memories total.\n"
+        "- Each memory must be about the user, Alex, or someone in their lives.\n"
+        "- Each memory must describe a DURABLE fact: preferences, traits, past experiences, future plans with dates, relationships, or ongoing situations.\n"
         "- Use only information stated by the USER. Ignore anything said by Alex/assistant.\n"
         "- Do NOT output general knowledge, definitions, or explanations.\n"
         "- Do NOT restate or summarize AI answers.\n"
         "- If no valid personal/contextual memory exists, output exactly: NONE\n\n"
+        "CRITICAL - MERGE related details into ONE memory:\n"
+        "- If multiple sentences describe the SAME event or outing, merge them into a single detailed sentence.\n"
+        "- Do NOT split one event into multiple micro-entries (e.g., 'went for a walk' + 'climbed a tree' = one memory).\n"
+        "- Preserve meaningful narrative detail within that single sentence (e.g., 'went for a walk and climbed a tree in the park').\n"
+        "- Only create a second memory if it describes a genuinely separate, unrelated event or fact.\n\n"
         "CRITICAL - 6-MONTH DURABILITY TEST:\n"
         "- ONLY save facts that would still matter in 6 months.\n"
         "- Ask: Would this fact be relevant or useful to recall months or years from now?\n"
@@ -1911,7 +1916,13 @@ def chat(data: ChatIn):
         # Inject memories after style instruction, before RAG examples
         if life_memories:
             life_text = "\n".join(f"- {m}" for m in life_memories)
-            system_prompt += f"\n\nRelevant past experiences (use ONLY these for past event questions):\n{life_text}"
+            system_prompt += (
+                f"\n\nRelevant past experiences (background context only):\n{life_text}\n"
+                "Use these as background context, not a script. "
+                "Do not quote or restate them verbatim. "
+                "Reconstruct events naturally in your own conversational tone. "
+                "Integrate relevant details fluidly and only when they relate to what the user just said."
+            )
 
         if memories:
             memory_text = "\n".join(f"- {m}" for m in memories)
@@ -2453,6 +2464,143 @@ def new_chat(data: NewChatIn):
         except Exception:
             pass
         return {"error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Life Memory Cleanup endpoints
+# ---------------------------------------------------------------------------
+
+# Simple header-token guard. If ADMIN_TOKEN is not set, the endpoints are
+# open (fine for local/dev). Set ADMIN_TOKEN env var in production.
+_ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
+
+def _check_admin(request_token: str | None) -> bool:
+    """Return True if the request should be allowed."""
+    if not _ADMIN_TOKEN:
+        return True  # open when env var not configured
+    return request_token == _ADMIN_TOKEN
+
+
+class _LifeMemoryCleanupApplyRequest(BaseModel):
+    proposed: list[dict]  # each has at least {"content": str}
+
+
+@app.post("/admin/life_memories/propose")
+def life_memories_propose(x_admin_token: str | None = None):
+    """Fetch all life memories and ask the LLM to produce a cleaned proposal."""
+    from fastapi import Request as _Request  # local import to avoid shadowing
+    if not _check_admin(x_admin_token):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    if not _ensure_db_connection():
+        raise HTTPException(status_code=503, detail="DB unavailable")
+
+    try:
+        with DB_CONN.cursor() as cur:
+            cur.execute("SELECT id, content FROM memories WHERE type = 'life' ORDER BY id")
+            rows = cur.fetchall()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"DB read error: {e}")
+
+    if not rows:
+        return {"proposed": [], "summary": {"before": 0, "after": 0, "merged": 0, "deleted": 0}}
+
+    before_count = len(rows)
+    numbered = "\n".join(f"{i+1}. {row[1].strip()}" for i, row in enumerate(rows))
+
+    cleanup_prompt = (
+        "You are cleaning up a personal memory database.\n\n"
+        "Input memories (one per line, numbered):\n"
+        f"{numbered}\n\n"
+        "Task:\n"
+        "- Merge near-duplicate or fragmented entries that describe the same event into ONE coherent memory.\n"
+        "- Remove true duplicates entirely.\n"
+        "- Preserve meaningful narrative detail — do NOT reduce to vague summaries.\n"
+        "- Do NOT invent new facts; only recombine or rewrite using the text already present.\n"
+        "- The output set should have fewer, higher-quality memories than the input.\n\n"
+        "Return ONLY valid JSON with this exact structure (no markdown, no commentary):\n"
+        "{\n"
+        '  "proposed": [\n'
+        '    { "content": "...", "tags": null, "year": null, "created_at": null }\n'
+        "  ],\n"
+        '  "summary": { "before": N, "after": M, "merged": X, "deleted": Y }\n'
+        "}\n"
+        f"before (N) must equal {before_count}. after (M) is the count of proposed memories."
+    )
+
+    try:
+        raw, _usage = _openai_chat_completion(
+            model="gpt-5-mini",
+            messages=[{"role": "user", "content": cleanup_prompt}],
+            max_tokens=4096,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"LLM error: {e}")
+
+    raw = (raw or "").strip()
+    # Strip accidental markdown fences
+    if raw.startswith("```"):
+        raw = re.sub(r"^```[a-zA-Z]*\n?", "", raw)
+        raw = re.sub(r"```$", "", raw).strip()
+
+    try:
+        result = json.loads(raw)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"LLM returned invalid JSON: {e}. Raw: {raw[:300]}")
+
+    # Ensure summary reflects reality
+    proposed = result.get("proposed", [])
+    after_count = len(proposed)
+    summary = result.get("summary", {})
+    summary["before"] = before_count
+    summary["after"] = after_count
+    result["summary"] = summary
+
+    logging.info(f"life_memories_propose: before={before_count} after={after_count}")
+    return result
+
+
+@app.post("/admin/life_memories/apply")
+def life_memories_apply(body: _LifeMemoryCleanupApplyRequest, x_admin_token: str | None = None):
+    """Replace all life memories with the approved proposed set."""
+    if not _check_admin(x_admin_token):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    if not _ensure_db_connection():
+        raise HTTPException(status_code=503, detail="DB unavailable")
+
+    new_contents = [m["content"].strip() for m in body.proposed if m.get("content", "").strip()]
+    if not new_contents:
+        raise HTTPException(status_code=400, detail="proposed list is empty")
+
+    try:
+        with DB_CONN.cursor() as cur:
+            cur.execute("DELETE FROM memories WHERE type = 'life'")
+            for content in new_contents:
+                mem_hash = _compute_memory_hash(content)
+                try:
+                    cur.execute(
+                        "INSERT INTO memories (content, type, normalized_hash) VALUES (%s, %s, %s) ON CONFLICT (type, normalized_hash) DO NOTHING",
+                        (content, "life", mem_hash),
+                    )
+                except Exception:
+                    cur.execute("INSERT INTO memories (content, type) VALUES (%s, %s)", (content, "life"))
+        DB_CONN.commit()
+    except Exception as e:
+        try:
+            DB_CONN.rollback()
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=f"DB write error: {e}")
+
+    # Rebuild embedding cache
+    try:
+        _build_life_memory_embeddings()
+    except Exception:
+        pass
+
+    logging.info(f"life_memories_apply: inserted {len(new_contents)} memories")
+    return {"ok": True, "inserted": len(new_contents)}
 
 
 @app.get("/new_chat_progress/{session_id}")
