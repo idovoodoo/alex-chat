@@ -783,6 +783,8 @@
 
         /* Keep settings panel hidden when `.hidden` is present (don't show on startup) */
         #settings-panel.hidden { display: none !important; }
+        /* Keep review modal hidden when `.hidden` is present */
+        #memory-review-modal.hidden { display: none !important; }
     </style>
 </head>
 <body>
@@ -915,6 +917,35 @@
                 </div>
             </div>
             
+            <!-- Life Memory Review Modal -->
+            <div id="memory-review-modal" class="hidden" style="position:fixed;top:0;left:0;right:0;bottom:0;display:flex;align-items:flex-start;justify-content:center;z-index:4000;background:rgba(0,0,0,0.55);overflow-y:auto;padding:16px 0;">
+                <div style="background:#fff;border-radius:12px;max-width:720px;width:96%;margin:auto;padding:20px 22px 18px;box-shadow:0 6px 32px rgba(0,0,0,0.22);">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+                        <h3 style="margin:0;color:#075e54;font-size:15px;">Review Memory Cleanup</h3>
+                        <button id="review-close-btn" class="app-btn icon-btn" title="Cancel">✕</button>
+                    </div>
+                    <div id="review-summary" style="font-size:12px;color:#555;background:#f5f5f5;border-radius:6px;padding:7px 10px;margin-bottom:12px;"></div>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+                        <div>
+                            <div style="font-size:11px;font-weight:700;color:#c0392b;text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;" id="review-orig-heading">Before</div>
+                            <div id="review-orig-list" style="font-size:12px;line-height:1.7;max-height:380px;overflow-y:auto;border:1px solid #eee;border-radius:6px;padding:8px 10px;background:#fafafa;"></div>
+                        </div>
+                        <div>
+                            <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;">
+                                <span style="font-size:11px;font-weight:700;color:#075e54;text-transform:uppercase;letter-spacing:.04em;" id="review-proposed-heading">After</span>
+                                <button id="review-restore-removed-btn" class="app-btn" style="font-size:10px;padding:2px 7px;display:none;">Restore removed</button>
+                            </div>
+                            <div id="review-proposed-list" style="font-size:12px;line-height:1.7;max-height:380px;overflow-y:auto;border:1px solid #eee;border-radius:6px;padding:8px 10px;background:#f0faf6;"></div>
+                        </div>
+                    </div>
+                    <div style="margin-top:14px;display:flex;gap:8px;justify-content:flex-end;align-items:center;">
+                        <div id="review-apply-status" style="font-size:12px;color:#555;flex:1;"></div>
+                        <button id="review-cancel-btn" class="app-btn">Cancel</button>
+                        <button id="review-apply-btn" class="app-btn primary-btn">Apply Selected</button>
+                    </div>
+                </div>
+            </div>
+
             <div id="chat-container">
                 <!-- Messages will appear here -->
             </div>
@@ -1078,13 +1109,27 @@
 
         // ---- Life Memory Cleanup ----
         (function() {
-            const proposeBtn = document.getElementById('cleanup-propose-btn');
-            const applyBtn   = document.getElementById('cleanup-apply-btn');
-            const restoreBtn = document.getElementById('cleanup-restore-btn');
-            const statusEl   = document.getElementById('cleanup-status');
+            const proposeBtn  = document.getElementById('cleanup-propose-btn');
+            const applyBtn    = document.getElementById('cleanup-apply-btn');
+            const restoreBtn  = document.getElementById('cleanup-restore-btn');
+            const statusEl    = document.getElementById('cleanup-status');
             if (!proposeBtn) return;
 
-            let currentProposal = null;  // {proposed:[], summary:{}}
+            // Review modal elements
+            const reviewModal       = document.getElementById('memory-review-modal');
+            const reviewOrigList    = document.getElementById('review-orig-list');
+            const reviewPropList    = document.getElementById('review-proposed-list');
+            const reviewSummary     = document.getElementById('review-summary');
+            const reviewOrigHead    = document.getElementById('review-orig-heading');
+            const reviewPropHead    = document.getElementById('review-proposed-heading');
+            const reviewApplyBtn    = document.getElementById('review-apply-btn');
+            const reviewCancelBtn   = document.getElementById('review-cancel-btn');
+            const reviewCloseBtn    = document.getElementById('review-close-btn');
+            const reviewStatus      = document.getElementById('review-apply-status');
+            const restoreRemovedBtn = document.getElementById('review-restore-removed-btn');
+
+            let currentOriginal = [];   // [{content}] — snapshot from server
+            let currentProposed = [];   // [{content, tags, year, created_at, _removed}]
 
             function setStatus(msg, color) {
                 statusEl.textContent = msg;
@@ -1095,13 +1140,17 @@
                 return localStorage.getItem('adminToken') || '';
             }
 
-            function saveBackup(memories) {
-                const key = 'lifeMemoryBackup_' + new Date().toISOString();
+            function buildApiUrl(path) {
+                const token = getAdminToken();
+                return (window.API_BASE || '') + path + (token ? '?x_admin_token=' + encodeURIComponent(token) : '');
+            }
+
+            // ---- localStorage backup helpers ----
+            function saveBackup(original) {
                 const backups = JSON.parse(localStorage.getItem('lifeMemoryBackups') || '[]');
-                backups.unshift({ key, time: new Date().toISOString(), memories });
-                if (backups.length > 5) backups.length = 5;  // keep last 5
+                backups.unshift({ time: new Date().toISOString(), memories: original });
+                if (backups.length > 5) backups.length = 5;
                 localStorage.setItem('lifeMemoryBackups', JSON.stringify(backups));
-                return key;
             }
 
             function updateRestoreBtn() {
@@ -1110,36 +1159,125 @@
             }
             updateRestoreBtn();
 
+            // ---- Review modal rendering ----
+            function openReviewModal(original, proposed, summary) {
+                currentOriginal = original;
+                currentProposed = proposed.map(m => ({ ...m, _removed: false }));
+
+                // Summary bar
+                const s = summary || {};
+                reviewSummary.textContent =
+                    `Before: ${s.before ?? original.length} memories  →  After: ${s.after ?? proposed.length} proposed  `
+                    + (s.merged != null ? `· merged: ${s.merged}  ` : '')
+                    + (s.deleted != null ? `· deleted: ${s.deleted}` : '');
+
+                // Left column — originals (read-only)
+                reviewOrigHead.textContent = `Before (${original.length})`;
+                reviewOrigList.innerHTML = original.length
+                    ? original.map(m =>
+                        `<div style="padding:2px 0;border-bottom:1px solid #f0f0f0;color:#666;">${escapeHtml(m.content)}</div>`
+                      ).join('')
+                    : '<em style="color:#aaa">No memories</em>';
+
+                renderProposed();
+                reviewModal.classList.remove('hidden');
+            }
+
+            function escapeHtml(s) {
+                return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+            }
+
+            function renderProposed() {
+                const kept = currentProposed.filter(m => !m._removed);
+                reviewPropHead.textContent = `After (${kept.length} kept)`;
+                reviewApplyBtn.textContent = `Apply ${kept.length} Memor${kept.length === 1 ? 'y' : 'ies'}`;
+                const anyRemoved = currentProposed.some(m => m._removed);
+                restoreRemovedBtn.style.display = anyRemoved ? 'inline-block' : 'none';
+
+                reviewPropList.innerHTML = currentProposed.map((m, i) =>
+                    `<div data-idx="${i}" style="display:flex;align-items:flex-start;gap:6px;padding:3px 0;border-bottom:1px solid #e0f5ec;${m._removed ? 'opacity:0.35;text-decoration:line-through;' : ''}">
+                        <span style="flex:1;">${escapeHtml(m.content)}</span>
+                        <button onclick="window._cleanupToggleRow(${i})" title="${m._removed ? 'Restore' : 'Remove'}"
+                            style="flex-shrink:0;background:none;border:none;cursor:pointer;font-size:14px;line-height:1;color:${m._removed ? '#27ae60' : '#c0392b'};">
+                            ${m._removed ? '↩' : '✕'}
+                        </button>
+                    </div>`
+                ).join('') || '<em style="color:#aaa">All removed</em>';
+            }
+
+            window._cleanupToggleRow = function(i) {
+                if (i < 0 || i >= currentProposed.length) return;
+                currentProposed[i]._removed = !currentProposed[i]._removed;
+                renderProposed();
+            };
+
+            function closeReviewModal() {
+                reviewModal.classList.add('hidden');
+                reviewStatus.textContent = '';
+            }
+
+            reviewCloseBtn.addEventListener('click', closeReviewModal);
+            reviewCancelBtn.addEventListener('click', closeReviewModal);
+
+            restoreRemovedBtn.addEventListener('click', () => {
+                currentProposed.forEach(m => m._removed = false);
+                renderProposed();
+            });
+
+            // ---- Apply ----
+            reviewApplyBtn.addEventListener('click', async () => {
+                const kept = currentProposed.filter(m => !m._removed);
+                if (!kept.length) { reviewStatus.textContent = 'Nothing to apply — all entries removed.'; reviewStatus.style.color='#c0392b'; return; }
+                if (!confirm(`Apply ${kept.length} memories? The existing set will be replaced and a DB backup will be created.`)) return;
+
+                reviewApplyBtn.disabled = true;
+                reviewStatus.textContent = 'Applying…';
+                reviewStatus.style.color = '#555';
+
+                try {
+                    const res = await fetch(buildApiUrl('/admin/life_memories/apply'), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ proposed: kept })
+                    });
+                    if (!res.ok) {
+                        const err = await res.json().catch(() => ({ detail: res.statusText }));
+                        reviewStatus.textContent = 'Error: ' + (err.detail || res.statusText);
+                        reviewStatus.style.color = '#c0392b';
+                        reviewApplyBtn.disabled = false;
+                        return;
+                    }
+                    const data = await res.json();
+                    reviewStatus.textContent = `✓ Done — ${data.inserted} memories saved. DB backup created.`;
+                    reviewStatus.style.color = '#075e54';
+                    reviewApplyBtn.disabled = false;
+                    setStatus(`Cleanup applied: ${data.inserted} memories.`, '#075e54');
+                    // close after short delay
+                    setTimeout(closeReviewModal, 1800);
+                } catch (e) {
+                    reviewStatus.textContent = 'Network error: ' + e.message;
+                    reviewStatus.style.color = '#c0392b';
+                    reviewApplyBtn.disabled = false;
+                }
+            });
+
+            // ---- Propose ----
             proposeBtn.addEventListener('click', async () => {
                 proposeBtn.disabled = true;
-                applyBtn.disabled = true;
-                applyBtn.style.opacity = '0.4';
                 setStatus('Fetching and analysing memories…');
                 try {
-                    const token = getAdminToken();
-                    const url = (window.API_BASE || '') + '/admin/life_memories/propose'
-                        + (token ? '?x_admin_token=' + encodeURIComponent(token) : '');
-                    const res = await fetch(url, { method: 'POST' });
+                    const res = await fetch(buildApiUrl('/admin/life_memories/propose'), { method: 'POST' });
                     if (!res.ok) {
                         const err = await res.json().catch(() => ({ detail: res.statusText }));
                         setStatus('Error: ' + (err.detail || res.statusText), '#c0392b');
                         return;
                     }
                     const data = await res.json();
-                    // Save a backup of the original (we'll fetch the proposed as the "before")
-                    const beforeMemories = [];  // we don't have originals client-side; rely on server
-                    currentProposal = data;
-                    saveBackup(data.proposed);
+                    const original = data.original || [];
+                    saveBackup(original);
                     updateRestoreBtn();
-                    const s = data.summary || {};
-                    setStatus(
-                        `Proposal ready: ${s.before} → ${s.after} memories ` +
-                        `(merged: ${s.merged ?? '?'}, deleted: ${s.deleted ?? '?'}). ` +
-                        `Click "Apply Cleanup" to commit.`,
-                        '#075e54'
-                    );
-                    applyBtn.disabled = false;
-                    applyBtn.style.opacity = '1';
+                    setStatus(`Proposal ready — review the changes below.`, '#075e54');
+                    openReviewModal(original, data.proposed || [], data.summary || {});
                 } catch (e) {
                     setStatus('Network error: ' + e.message, '#c0392b');
                 } finally {
@@ -1147,50 +1285,23 @@
                 }
             });
 
-            applyBtn.addEventListener('click', async () => {
-                if (!currentProposal) return;
-                if (!confirm(`Apply cleanup? This will replace all life memories with ${currentProposal.proposed.length} entries. A backup is stored locally.`)) return;
-                applyBtn.disabled = true;
-                setStatus('Applying…');
-                try {
-                    const token = getAdminToken();
-                    const url = (window.API_BASE || '') + '/admin/life_memories/apply'
-                        + (token ? '?x_admin_token=' + encodeURIComponent(token) : '');
-                    const res = await fetch(url, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ proposed: currentProposal.proposed })
-                    });
-                    if (!res.ok) {
-                        const err = await res.json().catch(() => ({ detail: res.statusText }));
-                        setStatus('Error: ' + (err.detail || res.statusText), '#c0392b');
-                        applyBtn.disabled = false;
-                        return;
-                    }
-                    const data = await res.json();
-                    setStatus(`Done. ${data.inserted} memories saved.`, '#075e54');
-                    currentProposal = null;
-                    applyBtn.disabled = true;
-                    applyBtn.style.opacity = '0.4';
-                } catch (e) {
-                    setStatus('Network error: ' + e.message, '#c0392b');
-                    applyBtn.disabled = false;
-                }
-            });
-
+            // ---- Restore from localStorage backup ----
             restoreBtn.addEventListener('click', () => {
                 const backups = JSON.parse(localStorage.getItem('lifeMemoryBackups') || '[]');
-                if (!backups.length) { setStatus('No backups found.', '#c0392b'); return; }
+                if (!backups.length) { setStatus('No local backups found.', '#c0392b'); return; }
                 const latest = backups[0];
-                currentProposal = { proposed: latest.memories, summary: { before: '?', after: latest.memories.length, merged: 0, deleted: 0 } };
-                setStatus(
-                    `Backup loaded (${latest.memories.length} memories from ${latest.time.slice(0,19).replace('T',' ')}). ` +
-                    `Click "Apply Cleanup" to restore.`,
-                    '#e67e22'
+                const mems = latest.memories || [];
+                // Treat the backup as both original and proposed (user will remove what they don't want)
+                openReviewModal(
+                    mems,
+                    mems,
+                    { before: mems.length, after: mems.length, merged: 0, deleted: 0 }
                 );
-                applyBtn.disabled = false;
-                applyBtn.style.opacity = '1';
+                setStatus(`Backup from ${latest.time.slice(0,19).replace('T',' ')} loaded for review.`, '#e67e22');
             });
+
+            // Keep old apply btn wired but hidden (no longer shown)
+            if (applyBtn) { applyBtn.style.display = 'none'; }
         })();
 
         // Quick name selection

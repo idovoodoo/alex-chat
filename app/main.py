@@ -2512,9 +2512,10 @@ def life_memories_propose(x_admin_token: str | None = None):
         raise HTTPException(status_code=500, detail=f"DB read error: {e}")
 
     if not rows:
-        return {"proposed": [], "summary": {"before": 0, "after": 0, "merged": 0, "deleted": 0}}
+        return {"original": [], "proposed": [], "summary": {"before": 0, "after": 0, "merged": 0, "deleted": 0}}
 
     before_count = len(rows)
+    original_list = [{"content": row[1].strip()} for row in rows]
     numbered = "\n".join(f"{i+1}. {row[1].strip()}" for i, row in enumerate(rows))
 
     cleanup_prompt = (
@@ -2576,6 +2577,7 @@ def life_memories_propose(x_admin_token: str | None = None):
     summary["after"] = after_count
     result["summary"] = summary
 
+    result["original"] = original_list
     logging.info(f"life_memories_propose: before={before_count} after={after_count}")
     return result
 
@@ -2595,6 +2597,21 @@ def life_memories_apply(body: _LifeMemoryCleanupApplyRequest, x_admin_token: str
 
     try:
         with DB_CONN.cursor() as cur:
+            # --- DB backup before any destructive change ---
+            try:
+                cur.execute(
+                    "CREATE TABLE IF NOT EXISTS life_memory_backups "
+                    "(id SERIAL PRIMARY KEY, backed_up_at TIMESTAMPTZ DEFAULT NOW(), memories TEXT NOT NULL)"
+                )
+                cur.execute("SELECT content FROM memories WHERE type = 'life' ORDER BY id")
+                existing = [r[0] for r in cur.fetchall()]
+                cur.execute(
+                    "INSERT INTO life_memory_backups (memories) VALUES (%s)",
+                    (json.dumps(existing),)
+                )
+            except Exception as bk_err:
+                logging.warning(f"life_memories_apply: backup step failed (continuing): {bk_err}")
+            # --- Replace ---
             cur.execute("DELETE FROM memories WHERE type = 'life'")
             for content in new_contents:
                 mem_hash = _compute_memory_hash(content)
