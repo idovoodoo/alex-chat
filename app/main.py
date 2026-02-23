@@ -92,8 +92,17 @@ def _openai_chat_completion(*, model: str, messages: list[dict], temperature: fl
                 kwargs["max_tokens"] = max_tokens
         resp = client.chat.completions.create(**kwargs)
         # v1: reply in resp.choices[0].message.content
+        # Reasoning models (o1, o3, gpt-5.1 etc.) sometimes return content=None
+        # and put the actual answer in message.reasoning_content or message.output_text.
         choice0 = resp.choices[0]
-        reply_text = choice0.message.content
+        msg = choice0.message
+        reply_text = msg.content
+        if not reply_text:
+            reply_text = (
+                getattr(msg, "reasoning_content", None)
+                or getattr(msg, "output_text", None)
+                or ""
+            )
         usage = getattr(resp, "usage", None)
         return reply_text, usage
 
@@ -2529,8 +2538,9 @@ def life_memories_propose(x_admin_token: str | None = None):
     )
 
     try:
+        _cleanup_model = "gpt-5.1"
         raw, _usage = _openai_chat_completion(
-            model="gpt-5-mini",
+            model=_cleanup_model,
             messages=[{"role": "user", "content": cleanup_prompt}],
             max_tokens=4096,
         )
@@ -2542,6 +2552,16 @@ def life_memories_propose(x_admin_token: str | None = None):
     if raw.startswith("```"):
         raw = re.sub(r"^```[a-zA-Z]*\n?", "", raw)
         raw = re.sub(r"```$", "", raw).strip()
+
+    if not raw:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"LLM ({_cleanup_model}) returned an empty response. "
+                "This can happen with reasoning models when `content` is None. "
+                "Check that the model name is correct and the API key has access."
+            ),
+        )
 
     try:
         result = json.loads(raw)
