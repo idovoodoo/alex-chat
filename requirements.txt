@@ -1,7 +1,6 @@
 fastapi
 uvicorn
 openai>=2.0.0
-google-generativeai
 faiss-cpu
 numpy
 python-dotenv

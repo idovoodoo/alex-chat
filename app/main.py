@@ -4,16 +4,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-try:
-    # openai>=1.x
-    from openai import OpenAI  # type: ignore
-    _OPENAI_V1 = True
-except Exception:  # pragma: no cover
-    # openai<1.x fallback
-    OpenAI = None  # type: ignore
-    _OPENAI_V1 = False
-    import openai  # type: ignore
-import google.generativeai as genai
+# MiniMax uses the OpenAI-compatible client interface. No OpenAI or Gemini
+# generation client is used by the application.
+from openai import OpenAI  # type: ignore
 import os
 import json
 import psycopg2
@@ -35,7 +28,7 @@ import unicodedata
 # Only show WARNING and above in server logs (INFO goes to browser console via /debug/last_console)
 logging.basicConfig(level=logging.WARNING)
 
-# Suppress httpx INFO logs (HTTP requests to OpenAI)
+# Suppress httpx INFO logs (HTTP requests to MiniMax)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # Determine repo root early for .env loading
@@ -70,66 +63,36 @@ app.add_middleware(
 )
 
 
-# OpenAI v1 client using API key from environment (Render sets this)
-if _OPENAI_V1:
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-else:
-    openai.api_key = os.getenv("OPENAI_API_KEY")
-    client = openai
+# MiniMax exposes an OpenAI-compatible Chat Completions and Embeddings API.
+_MINIMAX_BASE_URL = os.getenv("MINIMAX_BASE_URL", "https://api.minimax.io/v1")
+_MINIMAX_MODEL = os.getenv("MINIMAX_MODEL", "MiniMax-M3")
+_MINIMAX_EMBEDDING_MODEL = os.getenv("MINIMAX_EMBEDDING_MODEL", "embo-01")
+minimax_client = OpenAI(
+    api_key=os.getenv("MINIMAX_API_KEY"),
+    base_url=_MINIMAX_BASE_URL,
+)
 
 
-def _openai_chat_completion(*, model: str, messages: list[dict], temperature: float | None = None, max_tokens: int | None = None):
-    """Compatibility wrapper for OpenAI chat completions across SDK versions."""
-    if _OPENAI_V1:
-        kwargs = {"model": model, "messages": messages}
-        if temperature is not None:
-            kwargs["temperature"] = temperature
-        if max_tokens is not None:
-            # GPT-5 models use `max_completion_tokens` instead of `max_tokens`.
-            if isinstance(model, str) and model.startswith("gpt-5"):
-                kwargs["max_completion_tokens"] = max_tokens
-            else:
-                kwargs["max_tokens"] = max_tokens
-        resp = client.chat.completions.create(**kwargs)
-        # v1: reply in resp.choices[0].message.content
-        # Reasoning models (o1, o3, gpt-5.1 etc.) sometimes return content=None
-        # and put the actual answer in message.reasoning_content or message.output_text.
-        choice0 = resp.choices[0]
-        msg = choice0.message
-        reply_text = msg.content
-        if not reply_text:
-            reply_text = (
-                getattr(msg, "reasoning_content", None)
-                or getattr(msg, "output_text", None)
-                or ""
-            )
-        usage = getattr(resp, "usage", None)
-        return reply_text, usage
-
-    # openai<1.x
+def _minimax_chat_completion(*, model: str, messages: list[dict], temperature: float | None = None, max_tokens: int | None = None):
+    """Call MiniMax through its OpenAI-compatible Chat Completions API."""
     kwargs = {"model": model, "messages": messages}
     if temperature is not None:
         kwargs["temperature"] = temperature
     if max_tokens is not None:
         kwargs["max_tokens"] = max_tokens
-    resp = client.ChatCompletion.create(**kwargs)
-    reply_text = resp["choices"][0]["message"]["content"]
-    usage = resp.get("usage")
-    return reply_text, usage
+
+    resp = minimax_client.chat.completions.create(**kwargs)
+    msg = resp.choices[0].message
+    reply_text = getattr(msg, "content", None) or getattr(msg, "reasoning_content", None) or ""
+    return reply_text, getattr(resp, "usage", None)
 
 
-def _openai_embedding(*, model: str, input_text: str):
-    """Compatibility wrapper for OpenAI embeddings across SDK versions."""
-    if _OPENAI_V1:
-        resp = client.embeddings.create(model=model, input=input_text)
-        data0 = resp.data[0]
-        vec = data0.embedding
-        usage = getattr(resp, "usage", None)
-        return vec, usage
-
-    resp = client.Embedding.create(model=model, input=input_text)
-    vec = resp["data"][0]["embedding"]
-    usage = resp.get("usage")
+def _minimax_embedding(*, model: str, input_text: str):
+    """Create embeddings through MiniMax's OpenAI-compatible API."""
+    resp = minimax_client.embeddings.create(model=model, input=input_text)
+    data0 = resp.data[0]
+    vec = data0.embedding
+    usage = getattr(resp, "usage", None)
     return vec, usage
 
 
@@ -205,10 +168,6 @@ def _compute_memory_hash(text: str) -> str:
     """
     normalized = _normalize_memory_text(text)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-
-
-# Configure Gemini API
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 
 # --- Minimal FAISS RAG wiring (loads at startup) ---
@@ -514,8 +473,9 @@ def _debug_db():
     diagnostics = {
         "_section_environment": "=== ENVIRONMENT ===",
         "render_detected": bool(render_detected),
-        "openai_api_key_set": bool(os.getenv("OPENAI_API_KEY")),
-        "gemini_api_key_set": bool(os.getenv("GEMINI_API_KEY")),
+        "minimax_api_key_set": bool(os.getenv("MINIMAX_API_KEY")),
+        "minimax_model": _MINIMAX_MODEL,
+        "minimax_embedding_model": _MINIMAX_EMBEDDING_MODEL,
         
         "_section_database": "=== DATABASE ===",
         "db_url_scheme": (parsed.scheme if parsed else None),
@@ -652,7 +612,7 @@ def _embed_text(text: str) -> tuple[np.ndarray, int]:
     Returns (vector, tokens_used). If the embedding response includes a usage
     field we use it; otherwise we fall back to `estimate_tokens`.
     """
-    vec, usage = _openai_embedding(model="text-embedding-3-small", input_text=text)
+    vec, usage = _minimax_embedding(model=_MINIMAX_EMBEDDING_MODEL, input_text=text)
 
     tokens_used = None
     if usage is not None:
@@ -1165,7 +1125,7 @@ def _summarize_conversation(session_history: list, user_name: str = "User") -> s
         LAST_NEW_CHAT_DEBUG["conversation_preview"] = conversation_text[:200] + "..." if len(conversation_text) > 200 else conversation_text
     
     # Create strict summarization prompt
-    # GPT-5 models use thinking tokens, so we need to be explicit about output format
+    # MiniMax M3 needs sufficient output budget for structured memory extraction.
     summary_prompt = (
         "Convert this chat into personal memory entries.\n\n"
         "Rules:\n"
@@ -1211,12 +1171,9 @@ def _summarize_conversation(session_history: list, user_name: str = "User") -> s
         if isinstance(LAST_NEW_CHAT_DEBUG, dict):
             LAST_NEW_CHAT_DEBUG["llm_call_1"] = "started"
         
-        # GPT-5 models use thinking tokens internally, so we need high max_tokens
-        # to ensure there's budget left for actual output after reasoning.
-        # Note: GPT-5-mini only supports default temperature (1)
-        # Increased to 4096 to allow enough headroom for thinking + output
-        summary, usage = _openai_chat_completion(
-            model="gpt-5-mini",
+        # Use a generous output budget for memory extraction.
+        summary, usage = _minimax_chat_completion(
+            model=_MINIMAX_MODEL,
             messages=[{"role": "user", "content": summary_prompt}],
             max_tokens=4096,
         )
@@ -1388,8 +1345,8 @@ def _get_tags_for_candidates(candidate_lines: list[str]) -> dict:
         for ln in candidate_lines:
             prompt += f"- {ln}\n"
 
-        summary, usage = _openai_chat_completion(
-            model="gpt-5-mini",
+        summary, usage = _minimax_chat_completion(
+            model=_MINIMAX_MODEL,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=512,
         )
@@ -1698,7 +1655,7 @@ class ChatIn(BaseModel):
     message: str
     session_id: str = "default"
     user_name: str = "User"
-    model: str = "gpt-5-mini"
+    model: str = "minimax"
 
 
 # Mount static files directory
@@ -1951,76 +1908,44 @@ def chat(data: ChatIn):
         messages = [{"role": "system", "content": system_prompt}, *session_history, {"role": "user", "content": data.message}]
 
         # Model generation - collect token usage per provider
-        # Enforce that the only allowed OpenAI model is `gpt-5-mini`.
         model = data.model
-        if model.startswith("gpt-") and model != "gpt-5-mini":
-            model = "gpt-5-mini"
+        if model == "minimax" or model.startswith("gpt-") or model.startswith("gemini"):
+            model = _MINIMAX_MODEL
 
         reply = ""
-        if model.startswith("gemini"):
-            # Use Gemini API
-            gemini_model = genai.GenerativeModel(data.model)
+        if model.startswith("MiniMax") or model.startswith("minimax-"):
+            reply, usage = _minimax_chat_completion(model=model, messages=messages)
 
-            # Convert messages to Gemini/plain prompt
-            gemini_prompt = system_prompt + "\n\n"
-            for msg in session_history:
-                if msg["role"] == "user":
-                    gemini_prompt += f"User: {msg['content']}\n"
-                elif msg["role"] == "assistant":
-                    gemini_prompt += f"Alex: {msg['content']}\n"
+            input_t = None
+            output_t = None
+            total_t = None
+            if usage is not None:
+                if isinstance(usage, dict):
+                    input_t = usage.get("prompt_tokens") or usage.get("input_tokens")
+                    output_t = usage.get("completion_tokens") or usage.get("output_tokens")
+                    total_t = usage.get("total_tokens")
+                else:
+                    input_t = getattr(usage, "prompt_tokens", None) or getattr(usage, "input_tokens", None)
+                    output_t = getattr(usage, "completion_tokens", None) or getattr(usage, "output_tokens", None)
+                    total_t = getattr(usage, "total_tokens", None)
 
-            gemini_prompt += f"User: {data.message}\nAlex:"
-
-            # Record estimated prompt tokens before the call (may be overwritten if provider returns real usage)
-            estimated_prompt_tokens = estimate_tokens(gemini_prompt)
-            try:
-                response = gemini_model.generate_content(gemini_prompt)
-            except Exception as e:
-                raise
-
-            # Extract text reply
-            reply_text = None
-            if hasattr(response, "text") and isinstance(response.text, str):
-                reply_text = response.text
-            elif hasattr(response, "candidates") and len(response.candidates) > 0:
-                # Google GenAI sometimes returns candidates
-                c0 = response.candidates[0]
-                reply_text = getattr(c0, "output", None) or getattr(c0, "content", None) or str(c0)
-            else:
-                reply_text = str(response)
-
-            # Try to read token usage from response (best-effort)
-            gemini_input = None
-            gemini_output = None
-            token_note = "estimated"
-            if hasattr(response, "token_usage"):
-                tu = response.token_usage
-                gemini_input = getattr(tu, "input_tokens", None) or getattr(tu, "prompt_tokens", None)
-                gemini_output = getattr(tu, "output_tokens", None) or getattr(tu, "completion_tokens", None)
-                token_note = "reported"
-            elif isinstance(response, dict) and "tokenUsage" in response:
-                tu = response["tokenUsage"]
-                gemini_input = tu.get("inputTokens") or tu.get("promptTokens")
-                gemini_output = tu.get("outputTokens") or tu.get("completionTokens")
-                token_note = "reported"
-
-            if gemini_input is None:
-                gemini_input = estimated_prompt_tokens
-            if gemini_output is None:
-                gemini_output = estimate_tokens(reply_text)
+            if input_t is None:
+                input_t = estimate_tokens(json.dumps(messages))
+            if output_t is None:
+                output_t = estimate_tokens(reply)
+            if total_t is None:
+                total_t = int(input_t) + int(output_t)
 
             token_calls.append({
-                "name": "gemini_generate",
-                "input_tokens": int(gemini_input),
-                "output_tokens": int(gemini_output),
-                "total_tokens": int(gemini_input) + int(gemini_output),
-                "note": token_note,
+                "name": "minimax_chat",
+                "input_tokens": int(input_t),
+                "output_tokens": int(output_t),
+                "total_tokens": int(total_t),
+                "note": "reported" if usage is not None else "estimated",
             })
-
-            reply = reply_text
         else:
-            # Use OpenAI API
-            reply, usage = _openai_chat_completion(model=model, messages=messages)
+            # Compatibility fallback: all chat requests still use MiniMax.
+            reply, usage = _minimax_chat_completion(model=_MINIMAX_MODEL, messages=messages)
 
             input_t = None
             output_t = None
@@ -2044,11 +1969,11 @@ def chat(data: ChatIn):
                 total_t = int(input_t) + int(output_t)
 
             token_calls.append({
-                "name": "openai_chat",
+                "name": "minimax_chat",
                 "input_tokens": int(input_t),
                 "output_tokens": int(output_t),
                 "total_tokens": int(total_t),
-                "note": "reported" if total_t is not None and usage is not None else "estimated",
+                "note": "reported" if usage is not None else "estimated",
             })
         
         # Update conversation history with user message and assistant reply
@@ -2539,8 +2464,8 @@ def life_memories_propose(x_admin_token: str | None = None):
     )
 
     try:
-        _cleanup_model = "gpt-5.1"
-        raw, _usage = _openai_chat_completion(
+        _cleanup_model = _MINIMAX_MODEL
+        raw, _usage = _minimax_chat_completion(
             model=_cleanup_model,
             messages=[{"role": "user", "content": cleanup_prompt}],
             max_tokens=4096,
