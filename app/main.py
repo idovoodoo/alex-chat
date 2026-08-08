@@ -4,8 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-# MiniMax uses the OpenAI-compatible client interface. No OpenAI or Gemini
-# generation client is used by the application.
+# MiniMax is used for chat generation. OpenAI is used for embeddings.
 from openai import OpenAI  # type: ignore
 import os
 import json
@@ -63,14 +62,15 @@ app.add_middleware(
 )
 
 
-# MiniMax exposes an OpenAI-compatible Chat Completions and Embeddings API.
+# MiniMax exposes an OpenAI-compatible Chat Completions API.
 _MINIMAX_BASE_URL = os.getenv("MINIMAX_BASE_URL", "https://api.minimax.io/v1")
 _MINIMAX_MODEL = os.getenv("MINIMAX_MODEL", "MiniMax-M3")
-_MINIMAX_EMBEDDING_MODEL = os.getenv("MINIMAX_EMBEDDING_MODEL", "embo-01")
+_OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 minimax_client = OpenAI(
     api_key=os.getenv("MINIMAX_API_KEY"),
     base_url=_MINIMAX_BASE_URL,
 )
+openai_embedding_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 def _minimax_chat_completion(*, model: str, messages: list[dict], temperature: float | None = None, max_tokens: int | None = None):
@@ -87,13 +87,20 @@ def _minimax_chat_completion(*, model: str, messages: list[dict], temperature: f
     return reply_text, getattr(resp, "usage", None)
 
 
-def _minimax_embedding(*, model: str, input_text: str):
-    """Create embeddings through MiniMax's OpenAI-compatible API."""
-    resp = minimax_client.embeddings.create(model=model, input=input_text)
-    data0 = resp.data[0]
-    vec = data0.embedding
-    usage = getattr(resp, "usage", None)
-    return vec, usage
+def _openai_embeddings(*, input_texts: list[str]):
+    """Create one or more embeddings using OpenAI's embeddings API."""
+    if not input_texts:
+        return [], None
+    response = openai_embedding_client.embeddings.create(
+        model=_OPENAI_EMBEDDING_MODEL,
+        input=input_texts,
+    )
+    vectors = [item.embedding for item in response.data]
+    if len(vectors) != len(input_texts):
+        raise ValueError(
+            f"OpenAI returned {len(vectors)} vectors for {len(input_texts)} texts"
+        )
+    return vectors, getattr(response, "usage", None)
 
 
 def _normalize_memory_text(text: str) -> str:
@@ -183,6 +190,7 @@ CORE_MEMORY_EMBEDDINGS: np.ndarray | None = None  # shape (n, d), row-normalized
 CORE_MEMORY_EMBEDDINGS_ERROR: str | None = None
 LIFE_MEMORY_TEXTS: list[str] | None = None
 LIFE_MEMORY_EMBEDDINGS: np.ndarray | None = None  # shape (n, d), row-normalized
+LIFE_MEMORY_EMBEDDINGS_ERROR: str | None = None
 DB_CONN = None
 DB_LAST_ERROR = None
 LAST_LIFE_RECALL = None
@@ -475,7 +483,7 @@ def _debug_db():
         "render_detected": bool(render_detected),
         "minimax_api_key_set": bool(os.getenv("MINIMAX_API_KEY")),
         "minimax_model": _MINIMAX_MODEL,
-        "minimax_embedding_model": _MINIMAX_EMBEDDING_MODEL,
+        "openai_embedding_model": _OPENAI_EMBEDDING_MODEL,
         
         "_section_database": "=== DATABASE ===",
         "db_url_scheme": (parsed.scheme if parsed else None),
@@ -488,6 +496,9 @@ def _debug_db():
         "cached_core_memories": len(MEMORIES) if isinstance(MEMORIES, list) else 0,
         "core_memory_embeddings_built": bool(CORE_MEMORY_EMBEDDINGS is not None and CORE_MEMORY_TEXTS is not None),
         "core_memory_embeddings_count": int(len(CORE_MEMORY_TEXTS) if isinstance(CORE_MEMORY_TEXTS, list) else 0),
+        "life_memory_embeddings_built": bool(LIFE_MEMORY_EMBEDDINGS is not None and LIFE_MEMORY_TEXTS is not None),
+        "life_memory_embeddings_count": int(len(LIFE_MEMORY_TEXTS) if isinstance(LIFE_MEMORY_TEXTS, list) else 0),
+        "life_memory_embeddings_error": LIFE_MEMORY_EMBEDDINGS_ERROR,
         "core_memory_embeddings_error": CORE_MEMORY_EMBEDDINGS_ERROR,
         
         "_section_patterns": "=== DETECTION PATTERNS ===",
@@ -606,13 +617,14 @@ def estimate_tokens(text: str) -> int:
     return max(1, math.ceil(len(text) / 4))
 
 
-def _embed_text(text: str) -> tuple[np.ndarray, int]:
+def _embed_text(text: str, embedding_type: str = "query") -> tuple[np.ndarray, int]:
     """Returns a (d,) float32 embedding vector and an estimated/observed token count.
 
     Returns (vector, tokens_used). If the embedding response includes a usage
     field we use it; otherwise we fall back to `estimate_tokens`.
     """
-    vec, usage = _minimax_embedding(model=_MINIMAX_EMBEDDING_MODEL, input_text=text)
+    vectors, usage = _openai_embeddings(input_texts=[text])
+    vec = vectors[0]
 
     tokens_used = None
     if usage is not None:
@@ -653,23 +665,20 @@ def _build_core_memory_embeddings() -> None:
     expected_d: int | None = None
 
     try:
-        for m in memory_texts:
-            try:
-                v, _tok = _embed_text(m)
-                if v.ndim != 1:
-                    continue
-                if expected_d is None:
-                    expected_d = int(v.shape[0])
-                elif int(v.shape[0]) != expected_d:
-                    continue
-                n = float(np.linalg.norm(v))
-                if n <= 0:
-                    continue
-                vectors.append((v / n).astype(np.float32))
-                kept_texts.append(m)
-            except Exception:
-                # Best-effort: skip individual failures.
+        raw_vectors, _usage = _openai_embeddings(input_texts=memory_texts)
+        for m, raw_vector in zip(memory_texts, raw_vectors):
+            v = np.asarray(raw_vector, dtype=np.float32)
+            if v.ndim != 1:
                 continue
+            if expected_d is None:
+                expected_d = int(v.shape[0])
+            elif int(v.shape[0]) != expected_d:
+                continue
+            n = float(np.linalg.norm(v))
+            if n <= 0:
+                continue
+            vectors.append((v / n).astype(np.float32))
+            kept_texts.append(m)
 
         if not vectors:
             CORE_MEMORY_TEXTS = []
@@ -696,12 +705,14 @@ def _build_life_memory_embeddings() -> None:
     This is called at startup and after /new_chat to cache embeddings for duplicate checking.
     Query-time duplicate checking embeds only the new memory and does cosine similarity.
     """
-    global LIFE_MEMORY_TEXTS, LIFE_MEMORY_EMBEDDINGS
+    global LIFE_MEMORY_TEXTS, LIFE_MEMORY_EMBEDDINGS, LIFE_MEMORY_EMBEDDINGS_ERROR
 
     LIFE_MEMORY_TEXTS = None
     LIFE_MEMORY_EMBEDDINGS = None
+    LIFE_MEMORY_EMBEDDINGS_ERROR = None
 
     if not _ensure_db_connection():
+        LIFE_MEMORY_EMBEDDINGS_ERROR = DB_LAST_ERROR or "database connection unavailable"
         logging.warning("Cannot build life memory embeddings: DB connection unavailable")
         return
 
@@ -722,27 +733,28 @@ def _build_life_memory_embeddings() -> None:
         kept_texts: list[str] = []
         expected_d: int | None = None
 
-        for m in memory_texts:
-            try:
-                v, _tok = _embed_text(m)
-                if v.ndim != 1:
-                    continue
-                if expected_d is None:
-                    expected_d = int(v.shape[0])
-                elif int(v.shape[0]) != expected_d:
-                    continue
-                n = float(np.linalg.norm(v))
-                if n <= 0:
-                    continue
-                vectors.append((v / n).astype(np.float32))
-                kept_texts.append(m)
-            except Exception:
-                # Best-effort: skip individual failures.
+        raw_vectors, _usage = _openai_embeddings(input_texts=memory_texts)
+        for m, raw_vector in zip(memory_texts, raw_vectors):
+            v = np.asarray(raw_vector, dtype=np.float32)
+            if v.ndim != 1:
                 continue
+            if expected_d is None:
+                expected_d = int(v.shape[0])
+            elif int(v.shape[0]) != expected_d:
+                continue
+            n = float(np.linalg.norm(v))
+            if n <= 0:
+                continue
+            vectors.append((v / n).astype(np.float32))
+            kept_texts.append(m)
 
         if not vectors:
             LIFE_MEMORY_TEXTS = []
             LIFE_MEMORY_EMBEDDINGS = None
+            LIFE_MEMORY_EMBEDDINGS_ERROR = (
+                f"failed to embed all {len(memory_texts)} life memories"
+            )
+            logging.error(f"Life memory embedding failed: {LIFE_MEMORY_EMBEDDINGS_ERROR}")
             return
 
         LIFE_MEMORY_TEXTS = kept_texts
@@ -751,7 +763,27 @@ def _build_life_memory_embeddings() -> None:
     except Exception as e:
         LIFE_MEMORY_TEXTS = []
         LIFE_MEMORY_EMBEDDINGS = None
+        LIFE_MEMORY_EMBEDDINGS_ERROR = f"{type(e).__name__}: {e}"
         logging.exception(f"Failed to build life memory embeddings: {type(e).__name__}: {e}")
+
+
+def _ensure_life_memory_cache_current() -> None:
+    """Refresh the life-memory embedding cache when the database row count changed."""
+    if not _ensure_db_connection():
+        return
+
+    try:
+        with DB_CONN.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM memories WHERE type = 'life'")
+            db_count = int(cur.fetchone()[0])
+        cached_count = len(LIFE_MEMORY_TEXTS) if isinstance(LIFE_MEMORY_TEXTS, list) else -1
+        if cached_count != db_count:
+            logging.info(
+                f"Refreshing life memory cache: database={db_count}, cached={cached_count}"
+            )
+            _build_life_memory_embeddings()
+    except Exception as e:
+        logging.warning(f"Could not verify life memory cache: {type(e).__name__}: {e}")
 
 
 def _retrieve_top_chunks(query: str, k: int = RAG_CHUNKS_TO_RETRIEVE) -> tuple[list[str], int]:
@@ -795,6 +827,9 @@ def _log_debug_to_console(tag: str = "") -> None:
             "DB_LAST_ERROR": DB_LAST_ERROR,
             "core_memory_embeddings_built": bool(CORE_MEMORY_EMBEDDINGS is not None and CORE_MEMORY_TEXTS is not None),
             "core_memory_embeddings_count": int(len(CORE_MEMORY_TEXTS) if isinstance(CORE_MEMORY_TEXTS, list) else 0),
+            "life_memory_embeddings_built": bool(LIFE_MEMORY_EMBEDDINGS is not None and LIFE_MEMORY_TEXTS is not None),
+            "life_memory_embeddings_count": int(len(LIFE_MEMORY_TEXTS) if isinstance(LIFE_MEMORY_TEXTS, list) else 0),
+            "life_memory_embeddings_error": LIFE_MEMORY_EMBEDDINGS_ERROR,
         }
         s = json.dumps(payload, ensure_ascii=False, default=str)
         if len(s) > DEBUG_CONSOLE_TRUNCATE_LIMIT:
@@ -1017,6 +1052,9 @@ def _search_life_memories(message: str, limit: int = LIFE_RECALL_MAX_INJECT, thr
     
     if LIFE_RECALL_DEBUG is None:
         LIFE_RECALL_DEBUG = {}
+
+    # Memories may have been added outside this process since startup.
+    _ensure_life_memory_cache_current()
     
     if not isinstance(message, str) or not message.strip():
         LIFE_RECALL_DEBUG["error"] = "empty message"
@@ -1024,7 +1062,10 @@ def _search_life_memories(message: str, limit: int = LIFE_RECALL_MAX_INJECT, thr
         return []
     
     if LIFE_MEMORY_EMBEDDINGS is None or LIFE_MEMORY_TEXTS is None:
-        LIFE_RECALL_DEBUG["error"] = "life memory embeddings not available"
+        LIFE_RECALL_DEBUG["error"] = (
+            "life memory embeddings not available"
+            + (f": {LIFE_MEMORY_EMBEDDINGS_ERROR}" if LIFE_MEMORY_EMBEDDINGS_ERROR else "")
+        )
         logging.warning("Life memory search skipped: embeddings not built")
         return []
     
@@ -1204,6 +1245,19 @@ def _summarize_conversation(session_history: list, user_name: str = "User") -> s
             if isinstance(LAST_NEW_CHAT_DEBUG, dict):
                 LAST_NEW_CHAT_DEBUG["final_result"] = "NONE or empty"
             return ""
+
+        # Some reasoning-capable responses leak internal analysis markers into
+        # the normal content field.  Remove complete think blocks, but reject
+        # an unclosed think block rather than storing its analysis as memory.
+        summary = re.sub(r"<think>.*?</think>", "", summary, flags=re.IGNORECASE | re.DOTALL)
+        if re.search(r"<think>|</think>", summary, flags=re.IGNORECASE):
+            summary = re.sub(r"<\/?think>.*", "", summary, flags=re.IGNORECASE | re.DOTALL)
+        summary = re.sub(r"```(?:text|markdown)?\s*", "", summary, flags=re.IGNORECASE)
+        summary = summary.replace("```", "").strip()
+        if not summary:
+            if isinstance(LAST_NEW_CHAT_DEBUG, dict):
+                LAST_NEW_CHAT_DEBUG["final_result"] = "empty after removing reasoning markup"
+            return ""
         
         # Split to candidate lines; enforce 1 sentence per line; filter junk.
         lines_in = [ln.strip() for ln in summary.split("\n") if ln.strip()]
@@ -1265,6 +1319,28 @@ def _summarize_conversation(session_history: list, user_name: str = "User") -> s
             " adjusted ",
         )
 
+        # Models occasionally ignore the output-only instruction and return a
+        # heading or analysis fragment instead of a memory.  These must never
+        # reach the database as durable life memories.
+        bad_line_prefixes = (
+            "looking at what ",
+            "looking at the conversation",
+            "here are the memories",
+            "here are some memories",
+            "possible memories:",
+            "memories:",
+            "analysis:",
+            "answer:",
+            "output:",
+            "sure,",
+        )
+        bad_line_patterns = (
+            r"^\s*(?:[-*•]|\d+[.)])\s*$",       # empty bullet/number marker
+            r"^\s*(?:[-*•]|\d+[.)])\s+",       # markdown/list prefix
+            r"^\s*(?:analysis|reasoning|thoughts?)\s*:",
+            r"^\s*<\/?think\b",
+        )
+
         cleaned: list[str] = []
         seen_norm: set[str] = set()
 
@@ -1273,9 +1349,20 @@ def _summarize_conversation(session_history: list, user_name: str = "User") -> s
                 continue
             if ln.startswith("-"):
                 ln = ln.lstrip("- ").strip()
+            if any(re.search(pattern, ln, flags=re.IGNORECASE) for pattern in bad_line_patterns):
+                continue
             # Enforce one sentence
             ln = re.split(r"(?<=[.!?])\s+", ln, maxsplit=1)[0].strip()
             if not ln:
+                continue
+
+            # Reject headings, meta-commentary, and incomplete fragments such
+            # as "Looking at what Steve actually said:".  A colon-terminated
+            # line is not a complete memory sentence.
+            lower_line = ln.lower()
+            if lower_line.startswith(bad_line_prefixes) or ln.endswith(":"):
+                continue
+            if len(ln.split()) < 4:
                 continue
 
             lower = f" {ln.lower()} "
