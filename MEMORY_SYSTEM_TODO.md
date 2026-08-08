@@ -27,6 +27,12 @@ Verify and improve the end-to-end memory pipeline:
 - [ ] Confirm the selected memory is included in the prompt sent to MiniMax.
 - [ ] Test an ordinary message and confirm unnecessary life-memory recall is skipped.
 
+### Response quality: use retrieved context naturally
+
+- [ ] Treat relevant memory as a reason to expand a yes/no answer, not just as hidden background.
+- [ ] Keep replies concise, but require one concrete remembered detail and a natural follow-up when the memory supports it.
+- [ ] Verify an experience question such as `have you been skiing?` produces a contextual answer rather than only `yes`.
+
 ### Completed-chat memory extraction
 
 - [x] Start a fresh chat and discuss a new durable personal fact.
@@ -47,6 +53,12 @@ Verify and improve the end-to-end memory pipeline:
 - Completed-chat extraction saved one new life-memory candidate: `Steve wants to create games in Alex's name as an ongoing tribute project.`
 - Duplicate checking completed with `0` duplicates skipped.
 - The latest indirect query returned `2` life-memory results, but `recall_triggered = false`; explicit-trigger behavior still needs verification.
+- Retrieval issue identified: nationality questions such as `where are you from` may not be semantically close enough to stored facts such as `Alex is Norwegian.`; the model can otherwise infer nationality from the England setting.
+- Added an identity-question safeguard in `app/main.py` so nationality/origin questions prioritise matching identity facts from core memory, plus prompt-injection diagnostics in `/debug/last_console`.
+- Added a prompt guardrail preventing nationality/origin inference from current location, conversation setting, or language.
+- Follow-up test showed the first safeguard was incomplete: `_select_memories()` returned early when embedding similarity was below the normal threshold, so the identity fact never reached the prompt. Identity matches now bypass that early return, and diagnostics expose `identity_question` and `identity_memory_selected`.
+- Generalised the safeguard beyond nationality: fact-shaped questions now receive a conservative lower-threshold core-memory fallback, limited to three results, while ordinary messages retain the normal threshold. `/debug/last_console` now includes `CORE_MEMORY_DEBUG` with the question type, similarity, gate, and selected previews.
+- Changed life-memory retrieval to run a semantic search for every chat message. Explicit recall or past-event questions use the broader recall threshold; ordinary messages use the stricter contextual threshold and smaller result limit. Retrieval mode is included in `/debug/db` diagnostics.
 
 ### Reliability and rate-limit handling
 
@@ -119,6 +131,9 @@ A better approach is:
 - Always run a lightweight semantic search.
 - Use stricter thresholds for ordinary messages.
 - Use a larger result limit for explicit recall questions.
+
+Status: implemented in `app/main.py`. Verify with an indirect question that does
+not contain a recall trigger, then inspect `/debug/db` and `/debug/last_console`.
 
 ### 7. Use memory IDs and metadata
 

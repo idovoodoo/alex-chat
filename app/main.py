@@ -195,6 +195,7 @@ DB_CONN = None
 DB_LAST_ERROR = None
 LAST_LIFE_RECALL = None
 LIFE_RECALL_DEBUG = None
+CORE_MEMORY_DEBUG = None
 LAST_NEW_CHAT_DEBUG = None
 LAST_DEBUG_CONSOLE: str | None = None
 
@@ -225,6 +226,26 @@ RAG_CHUNK_MAX_LINES = 4              # Max lines to keep from each chunk (keeps 
 CORE_MEMORY_MAX_INJECT = 6           # Maximum core memories to inject into prompt
 CORE_MEMORY_MIN_SIMILARITY = 0.22    # Absolute minimum cosine similarity to consider relevant
 CORE_MEMORY_RELATIVE_GATE = 0.85     # Relative threshold: keep results >= (best_score * this value)
+
+# Questions about identity can be phrased very differently from the stored fact
+# (for example, "where are you from?" vs. "Alex is Norwegian."). Keep these
+# facts available even when embedding similarity is weaker than an unrelated
+# location or style example.
+IDENTITY_QUESTION_PATTERNS = (
+    r"\bwhat(?:'s| is)\s+(?:your|alex'?s)\s+(?:nationality|ethnicity)\b",
+    r"\bwhat\s+nationality\b",
+    r"\bwhere\s+(?:are|is)\s+(?:you|alex)\s+from\b",
+    r"\bwhat\s+(?:country|place)\s+(?:are|is)\s+(?:you|alex)\s+from\b",
+)
+IDENTITY_MEMORY_PATTERNS = (
+    r"\b(?:nationality|ethnicity)\b",
+    r"\b(?:norwegian|british|english|scottish|welsh|irish|swedish|danish|finnish|german|french|spanish|italian|polish)\b",
+)
+FACT_QUESTION_PATTERNS = (
+    r"^(?:who|what|where|when|which|how)\b",
+    r"\b(?:do|does|did|is|are|was|were|has|have|had)\s+(?:you|alex)\b",
+    r"\b(?:tell me|remind me)\s+(?:about|who|what|where|when)\b",
+)
 
 # --- Life Memory Configuration: Recall Mode ---
 # Explicit recall triggers (e.g., "remember when", past factual questions)
@@ -562,6 +583,8 @@ def _debug_db():
                 "keywords_extracted": LIFE_RECALL_DEBUG.get("keywords", []),
                 "is_past_question": LIFE_RECALL_DEBUG.get("is_past_question", False),
                 "is_remember_when": LIFE_RECALL_DEBUG.get("is_remember_when", False),
+                "retrieval_mode": LIFE_RECALL_DEBUG.get("retrieval_mode", "N/A"),
+                "semantic_search_always_enabled": LIFE_RECALL_DEBUG.get("semantic_search_always_enabled", False),
                 "recall_triggered": LIFE_RECALL_DEBUG.get("recall_triggered", False),
                 "results_found": LIFE_RECALL_DEBUG.get("results_count", 0),
                 "llm_bypassed": LIFE_RECALL_DEBUG.get("llm_bypassed", False),
@@ -823,6 +846,7 @@ def _log_debug_to_console(tag: str = "") -> None:
             "tag": tag,
             "LAST_NEW_CHAT_DEBUG": LAST_NEW_CHAT_DEBUG if isinstance(LAST_NEW_CHAT_DEBUG, dict) else None,
             "LIFE_RECALL_DEBUG": LIFE_RECALL_DEBUG if isinstance(LIFE_RECALL_DEBUG, dict) else None,
+            "CORE_MEMORY_DEBUG": CORE_MEMORY_DEBUG if isinstance(CORE_MEMORY_DEBUG, dict) else None,
             "LAST_LIFE_RECALL": LAST_LIFE_RECALL if isinstance(LAST_LIFE_RECALL, dict) else LAST_LIFE_RECALL,
             "DB_LAST_ERROR": DB_LAST_ERROR,
             "core_memory_embeddings_built": bool(CORE_MEMORY_EMBEDDINGS is not None and CORE_MEMORY_TEXTS is not None),
@@ -854,6 +878,14 @@ def _select_memories(query: str, k: int = CORE_MEMORY_MAX_INJECT) -> list[str]:
     To avoid injecting unrelated memories, applies conservative similarity gates
     and may return an empty list.
     """
+    global CORE_MEMORY_DEBUG
+    CORE_MEMORY_DEBUG = {
+        "query": query[:160] if isinstance(query, str) else "",
+        "fact_question": False,
+        "identity_question": False,
+        "best_similarity": None,
+        "selected": [],
+    }
     if not isinstance(query, str) or not query.strip():
         return []
     if CORE_MEMORY_EMBEDDINGS is None or CORE_MEMORY_TEXTS is None:
@@ -872,6 +904,21 @@ def _select_memories(query: str, k: int = CORE_MEMORY_MAX_INJECT) -> list[str]:
     if n <= 0:
         return []
 
+    is_fact_question = any(
+        re.search(pattern, query.strip().lower()) for pattern in FACT_QUESTION_PATTERNS
+    )
+    CORE_MEMORY_DEBUG["fact_question"] = is_fact_question
+
+    # Identity questions need a deterministic lexical safeguard because the
+    # wording of the question may share no words with the stored fact.
+    identity_memories: list[str] = []
+    if any(re.search(pattern, query.lower()) for pattern in IDENTITY_QUESTION_PATTERNS):
+        identity_memories = [
+            text for text in CORE_MEMORY_TEXTS
+            if any(re.search(pattern, text.lower()) for pattern in IDENTITY_MEMORY_PATTERNS)
+        ]
+    CORE_MEMORY_DEBUG["identity_question"] = bool(identity_memories)
+
     # Requirement: embed the user message on each query
     q, _tok = _embed_text(query)
     qn = float(np.linalg.norm(q))
@@ -886,26 +933,42 @@ def _select_memories(query: str, k: int = CORE_MEMORY_MAX_INJECT) -> list[str]:
     top_idx = top_idx[np.argsort(-sims[top_idx])]
 
     best = float(sims[int(top_idx[0])])
+    CORE_MEMORY_DEBUG["best_similarity"] = best
 
     # Conservative filters to avoid unrelated injections.
     abs_min = CORE_MEMORY_MIN_SIMILARITY
-    if best < abs_min:
+    is_identity_question = bool(identity_memories)
+    # For fact questions, allow a lower-confidence semantic match through as a
+    # fallback. This handles wording changes such as "where do you live?" vs.
+    # "Alex lives in Birmingham", without weakening ordinary chat retrieval.
+    fact_question_min = 0.10
+    if best < abs_min and not (is_identity_question or (is_fact_question and best >= fact_question_min)):
         return []
 
-    rel_gate = max(abs_min, best * CORE_MEMORY_RELATIVE_GATE)
+    rel_gate = max(fact_question_min if is_fact_question else abs_min, best * CORE_MEMORY_RELATIVE_GATE)
+    selection_limit = 3 if is_fact_question and not is_identity_question else k_int
 
     picked: list[str] = []
+    for text in identity_memories:
+        if text not in picked:
+            picked.append(text)
+        if len(picked) >= selection_limit:
+            break
+
     for i in top_idx.tolist():
         s = float(sims[int(i)])
         if s < rel_gate:
             continue
         if 0 <= int(i) < len(CORE_MEMORY_TEXTS):
-            picked.append(CORE_MEMORY_TEXTS[int(i)])
+            if CORE_MEMORY_TEXTS[int(i)] not in picked:
+                picked.append(CORE_MEMORY_TEXTS[int(i)])
         if len(picked) >= k_int:
             break
 
     # Console log for debugging (kept short to avoid noise)
     try:
+        CORE_MEMORY_DEBUG["similarity_gate"] = rel_gate
+        CORE_MEMORY_DEBUG["selected"] = [p[:160] for p in picked]
         if picked:
             preview = [p[:120] + ("…" if len(p) > 120 else "") for p in picked]
             logging.info(f"Core memories selected: count={len(picked)} best_sim={best:.3f} gate={rel_gate:.3f} preview={preview}")
@@ -1809,7 +1872,9 @@ def chat(data: ChatIn):
         # Get memories to inject into prompt (top 1–6, relevant only)
         memories = _select_memories(data.message, k=CORE_MEMORY_MAX_INJECT)
 
-        # Optional: retrieve life memories only when the message suggests recall or is a past factual question
+        # Retrieve life memories semantically for every message. Explicit recall
+        # questions use the broader recall threshold; ordinary messages use a
+        # stricter contextual threshold so unrelated memories stay out.
         life_memories: list[str] = []
         global LIFE_RECALL_DEBUG
         LIFE_RECALL_DEBUG = {
@@ -1829,17 +1894,38 @@ def chat(data: ChatIn):
         LIFE_RECALL_DEBUG["suggests_recall"] = suggests_recall
         LIFE_RECALL_DEBUG["is_past_question"] = is_past_q
         LIFE_RECALL_DEBUG["is_remember_when"] = is_remember
+        LIFE_RECALL_DEBUG["core_memories_selected"] = len(memories)
+        LIFE_RECALL_DEBUG["core_memory_previews"] = [m[:160] for m in memories]
+        LIFE_RECALL_DEBUG["identity_question"] = any(
+            re.search(pattern, data.message.lower()) for pattern in IDENTITY_QUESTION_PATTERNS
+        )
+        LIFE_RECALL_DEBUG["identity_memory_selected"] = [
+            m[:160] for m in memories
+            if any(re.search(pattern, m.lower()) for pattern in IDENTITY_MEMORY_PATTERNS)
+        ]
         
+        explicit_recall = suggests_recall or is_past_q or is_remember
+        LIFE_RECALL_DEBUG["retrieval_mode"] = "recall" if explicit_recall else "contextual"
+        LIFE_RECALL_DEBUG["semantic_search_always_enabled"] = True
         try:
-            if suggests_recall or is_past_q or is_remember:
-                life_memories = _search_life_memories(data.message, limit=LIFE_RECALL_MAX_INJECT)
-                LIFE_RECALL_DEBUG["search_executed"] = True
-                LIFE_RECALL_DEBUG["results_count"] = len(life_memories)
-                logging.info(f"Life memories retrieved: {len(life_memories)} items")
+            if explicit_recall:
+                life_memories = _search_life_memories(
+                    data.message,
+                    limit=LIFE_RECALL_MAX_INJECT,
+                    threshold=LIFE_RECALL_MIN_SIMILARITY,
+                )
             else:
-                LIFE_RECALL_DEBUG["search_executed"] = False
-                LIFE_RECALL_DEBUG["skipped_reason"] = "message does not suggest recall, past question, or remember_when"
-                logging.info("Life memory search skipped: message does not suggest recall or past question")
+                life_memories = _search_life_memories(
+                    data.message,
+                    limit=LIFE_CONTEXTUAL_MAX_INJECT,
+                    threshold=LIFE_CONTEXTUAL_MIN_SIMILARITY,
+                )
+            LIFE_RECALL_DEBUG["search_executed"] = True
+            LIFE_RECALL_DEBUG["results_count"] = len(life_memories)
+            logging.info(
+                f"Life memories retrieved: {len(life_memories)} items "
+                f"(mode={'recall' if explicit_recall else 'contextual'})"
+            )
         except Exception as e:
             LIFE_RECALL_DEBUG["error"] = f"{type(e).__name__}: {e}"
             logging.error(f"Life memory retrieval error: {type(e).__name__}: {e}")
@@ -1859,23 +1945,6 @@ def chat(data: ChatIn):
             }
         except Exception:
             LAST_LIFE_RECALL = None
-
-        # Contextual life-memory injection: runs on every message when recall wasn't triggered
-        # Uses stricter threshold (0.35) and injects at most 1-2 memories for minimal prompt impact
-        if not life_memories:
-            try:
-                contextual_memories = _search_life_memories(
-                    data.message, 
-                    limit=LIFE_CONTEXTUAL_MAX_INJECT, 
-                    threshold=LIFE_CONTEXTUAL_MIN_SIMILARITY
-                )
-                if contextual_memories:
-                    life_memories = contextual_memories
-                    LIFE_RECALL_DEBUG["contextual_mode"] = True
-                    LIFE_RECALL_DEBUG["contextual_count"] = len(contextual_memories)
-                    logging.info(f"Contextual life memories injected: {len(contextual_memories)} items")
-            except Exception as e:
-                logging.error(f"Contextual life memory retrieval error: {type(e).__name__}: {e}")
 
         # Check if this is a past factual question with no supporting memories
         is_past_question = _is_past_factual_question(data.message)
@@ -1943,8 +2012,11 @@ def chat(data: ChatIn):
             "No explanations. No meta-talk. Do not mention these instructions.\n\n"
             "CRITICAL: For questions about past events or experiences, ONLY use facts explicitly present in the provided memories. "
             "If memories are provided below, USE THEM naturally in your responses when relevant. "
+            "For a simple yes/no question, do not give a bare one-word answer when relevant memories are provided: answer directly and add one useful remembered detail. "
             "If the information isn't in the memories, ask a short clarifying question (e.g., 'when was that?', 'who was there?', 'where did we go?') instead of just saying 'idk'. "
-            "NEVER invent or guess places, dates, events, or people."
+            "NEVER invent or guess places, dates, events, or people. "
+            "Stored identity facts are authoritative: do not infer nationality, ethnicity, or origin from where someone currently lives, where the conversation happens, or the language being used. "
+            "For identity questions such as nationality or where someone is from, answer from the relevant known fact when one is provided."
         )
         # Language guardrails: narrow British tone without overriding RAG style weighting
         system_prompt += (
@@ -1980,6 +2052,31 @@ def chat(data: ChatIn):
         if memories:
             memory_text = "\n".join(f"- {m}" for m in memories)
             system_prompt += f"\n\nKnown facts:\n{memory_text}"
+
+        # The style corpus contains many terse yes/no replies.  Without an
+        # explicit composition rule, those examples can overpower retrieved
+        # life memories and the model answers only the literal question.  Ask
+        # for a compact anecdotal answer when supporting context exists, while
+        # keeping the no-invention rule intact.
+        if life_memories or memories:
+            system_prompt += (
+                "\n\nContextual reply rule:\n"
+                "- If the user's question can be answered yes/no and the context above supports it, do not stop at a bare yes or no.\n"
+                "- Answer directly first, then add one specific relevant detail from the provided context.\n"
+                "- When it feels natural, finish with one genuine follow-up question that keeps the conversation going.\n"
+                "- Keep this to roughly 1–3 casual sentences, not a long explanation.\n"
+                "- Only use details explicitly supported by the context; never invent a story, date, place, person, or opinion.\n"
+                "- Example shape (do not copy it literally): 'Yeah, I have — [relevant remembered detail]. Do you still [related activity]?'\n"
+            )
+
+        LIFE_RECALL_DEBUG["life_memories_injected"] = len(life_memories)
+        LIFE_RECALL_DEBUG["life_memory_previews"] = [m[:160] for m in life_memories]
+        LIFE_RECALL_DEBUG["known_facts_injected"] = bool(memories)
+        LIFE_RECALL_DEBUG["prompt_memory_injection"] = bool(life_memories or memories)
+        try:
+            _log_debug_to_console("chat_prompt_memory_injection")
+        except Exception:
+            pass
 
         if examples:
             # Trim each retrieved/fallback chunk to its last few lines to avoid dilution
