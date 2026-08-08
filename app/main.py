@@ -1431,7 +1431,10 @@ def _summarize_conversation(session_history: list, user_name: str = "User") -> s
             lower = f" {ln.lower()} "
             if any(p in lower for p in bad_phrases):
                 continue
-            if len(ln.split()) > 25:
+            # Durable project memories can legitimately contain several
+            # concrete details. Keep them intact instead of silently dropping
+            # otherwise valid extraction results.
+            if len(ln.split()) > 60:
                 continue
 
             norm = re.sub(r"\s+", " ", ln.lower()).strip()

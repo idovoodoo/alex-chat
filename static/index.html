@@ -1035,9 +1035,6 @@
                 <!-- Messages will appear here -->
             </div>
 
-            <!-- Snackbar warning for long chats -->
-            <div id="snackbar">Chat is too long, start a new one</div>
-
             <div class="typing-indicator" id="typing-indicator">
                 <span></span>
                 <span></span>
@@ -1858,15 +1855,6 @@
             saveChats();
             renderChatList();
 
-            // If chat length grows too long, show snackbar suggestion
-            try {
-                const totalMessages = Array.isArray(chat.messages) ? chat.messages.length : 0;
-                if (totalMessages >= 20) {
-                    showSnackbar('Chat is too long, start a new one');
-                }
-            } catch (e) {
-                debugLog('snackbar check failed', e);
-            }
         }
 
         // Snackbar helper
