@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-# MiniMax is used for chat generation. OpenAI is used for embeddings.
+# OpenRouter is used for chat generation. OpenAI is used for embeddings.
 from openai import OpenAI  # type: ignore
 import os
 import json
@@ -27,7 +27,7 @@ import unicodedata
 # Only show WARNING and above in server logs (INFO goes to browser console via /debug/last_console)
 logging.basicConfig(level=logging.WARNING)
 
-# Suppress httpx INFO logs (HTTP requests to MiniMax)
+# Suppress httpx INFO logs (HTTP requests to OpenRouter)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # Determine repo root early for .env loading
@@ -62,26 +62,38 @@ app.add_middleware(
 )
 
 
-# MiniMax exposes an OpenAI-compatible Chat Completions API.
-_MINIMAX_BASE_URL = os.getenv("MINIMAX_BASE_URL", "https://api.minimax.io/v1")
-_MINIMAX_MODEL = os.getenv("MINIMAX_MODEL", "MiniMax-M3")
-_OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
-minimax_client = OpenAI(
-    api_key=os.getenv("MINIMAX_API_KEY"),
-    base_url=_MINIMAX_BASE_URL,
+# OpenRouter exposes OpenAI-compatible Chat Completions and Embeddings APIs.
+_OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+_OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-5.6-luna")
+# Reasoning effort per task ("low" | "medium" | "high"). Chat defaults to low for
+# snappy replies; memory extraction defaults to high for better judgment.
+_OPENROUTER_CHAT_EFFORT = os.getenv("OPENROUTER_CHAT_REASONING", "low")
+_OPENROUTER_MEMORY_EFFORT = os.getenv("OPENROUTER_MEMORY_REASONING", "high")
+_OPENROUTER_TAG_EFFORT = os.getenv("OPENROUTER_TAG_REASONING", "low")
+_OPENROUTER_CLEANUP_EFFORT = os.getenv("OPENROUTER_CLEANUP_REASONING", "medium")
+_OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "openai/text-embedding-3-small")
+openrouter_client = OpenAI(
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+    base_url=_OPENROUTER_BASE_URL,
 )
-openai_embedding_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+openai_embedding_client = openrouter_client
 
 
-def _minimax_chat_completion(*, model: str, messages: list[dict], temperature: float | None = None, max_tokens: int | None = None):
-    """Call MiniMax through its OpenAI-compatible Chat Completions API."""
+def _openrouter_chat_completion(*, model: str, messages: list[dict], temperature: float | None = None, max_tokens: int | None = None, reasoning_effort: str | None = None):
+    """Call OpenRouter through its OpenAI-compatible Chat Completions API.
+
+    reasoning_effort: optional "low" | "medium" | "high" — passed through
+    OpenRouter's `reasoning` parameter to control how hard the model thinks.
+    """
     kwargs = {"model": model, "messages": messages}
     if temperature is not None:
         kwargs["temperature"] = temperature
     if max_tokens is not None:
         kwargs["max_tokens"] = max_tokens
+    if reasoning_effort is not None:
+        kwargs["reasoning"] = {"effort": reasoning_effort}
 
-    resp = minimax_client.chat.completions.create(**kwargs)
+    resp = openrouter_client.chat.completions.create(**kwargs)
     msg = resp.choices[0].message
     reply_text = getattr(msg, "content", None) or getattr(msg, "reasoning_content", None) or ""
     return reply_text, getattr(resp, "usage", None)
@@ -502,9 +514,9 @@ def _debug_db():
     diagnostics = {
         "_section_environment": "=== ENVIRONMENT ===",
         "render_detected": bool(render_detected),
-        "minimax_api_key_set": bool(os.getenv("MINIMAX_API_KEY")),
-        "minimax_model": _MINIMAX_MODEL,
-        "openai_embedding_model": _OPENAI_EMBEDDING_MODEL,
+        "openrouter_api_key_set": bool(os.getenv("OPENROUTER_API_KEY")),
+        "openrouter_model": _OPENROUTER_MODEL,
+        "openrouter_embedding_model": _OPENAI_EMBEDDING_MODEL,
         
         "_section_database": "=== DATABASE ===",
         "db_url_scheme": (parsed.scheme if parsed else None),
@@ -1229,7 +1241,7 @@ def _summarize_conversation(session_history: list, user_name: str = "User") -> s
         LAST_NEW_CHAT_DEBUG["conversation_preview"] = conversation_text[:200] + "..." if len(conversation_text) > 200 else conversation_text
     
     # Create strict summarization prompt
-    # MiniMax M3 needs sufficient output budget for structured memory extraction.
+    # OpenRouter needs sufficient output budget for structured memory extraction.
     summary_prompt = (
         "Convert this chat into personal memory entries.\n\n"
         "Rules:\n"
@@ -1276,10 +1288,11 @@ def _summarize_conversation(session_history: list, user_name: str = "User") -> s
             LAST_NEW_CHAT_DEBUG["llm_call_1"] = "started"
         
         # Use a generous output budget for memory extraction.
-        summary, usage = _minimax_chat_completion(
-            model=_MINIMAX_MODEL,
+        summary, usage = _openrouter_chat_completion(
+            model=_OPENROUTER_MODEL,
             messages=[{"role": "user", "content": summary_prompt}],
             max_tokens=4096,
+            reasoning_effort=_OPENROUTER_MEMORY_EFFORT,
         )
         
         # Track token usage
@@ -1498,10 +1511,11 @@ def _get_tags_for_candidates(candidate_lines: list[str]) -> dict:
         for ln in candidate_lines:
             prompt += f"- {ln}\n"
 
-        summary, usage = _minimax_chat_completion(
-            model=_MINIMAX_MODEL,
+        summary, usage = _openrouter_chat_completion(
+            model=_OPENROUTER_MODEL,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=512,
+            reasoning_effort=_OPENROUTER_TAG_EFFORT,
         )
 
         tags_map: dict = {}
@@ -1808,7 +1822,7 @@ class ChatIn(BaseModel):
     message: str
     session_id: str = "default"
     user_name: str = "User"
-    model: str = "minimax"
+    model: str = "openrouter"
 
 
 # Mount static files directory
@@ -2096,12 +2110,12 @@ def chat(data: ChatIn):
 
         # Model generation - collect token usage per provider
         model = data.model
-        if model == "minimax" or model.startswith("gpt-") or model.startswith("gemini"):
-            model = _MINIMAX_MODEL
+        if model == "openrouter" or model.startswith("gpt-") or model.startswith("gemini"):
+            model = _OPENROUTER_MODEL
 
         reply = ""
-        if model.startswith("MiniMax") or model.startswith("minimax-"):
-            reply, usage = _minimax_chat_completion(model=model, messages=messages)
+        if True:
+            reply, usage = _openrouter_chat_completion(model=model, messages=messages, reasoning_effort=_OPENROUTER_CHAT_EFFORT)
 
             input_t = None
             output_t = None
@@ -2124,15 +2138,15 @@ def chat(data: ChatIn):
                 total_t = int(input_t) + int(output_t)
 
             token_calls.append({
-                "name": "minimax_chat",
+                "name": "openrouter_chat",
                 "input_tokens": int(input_t),
                 "output_tokens": int(output_t),
                 "total_tokens": int(total_t),
                 "note": "reported" if usage is not None else "estimated",
             })
         else:
-            # Compatibility fallback: all chat requests still use MiniMax.
-            reply, usage = _minimax_chat_completion(model=_MINIMAX_MODEL, messages=messages)
+            # Compatibility fallback: all chat requests still use OpenRouter.
+            reply, usage = _openrouter_chat_completion(model=_OPENROUTER_MODEL, messages=messages, reasoning_effort=_OPENROUTER_CHAT_EFFORT)
 
             input_t = None
             output_t = None
@@ -2156,7 +2170,7 @@ def chat(data: ChatIn):
                 total_t = int(input_t) + int(output_t)
 
             token_calls.append({
-                "name": "minimax_chat",
+                "name": "openrouter_chat",
                 "input_tokens": int(input_t),
                 "output_tokens": int(output_t),
                 "total_tokens": int(total_t),
@@ -2651,11 +2665,12 @@ def life_memories_propose(x_admin_token: str | None = None):
     )
 
     try:
-        _cleanup_model = _MINIMAX_MODEL
-        raw, _usage = _minimax_chat_completion(
+        _cleanup_model = _OPENROUTER_MODEL
+        raw, _usage = _openrouter_chat_completion(
             model=_cleanup_model,
             messages=[{"role": "user", "content": cleanup_prompt}],
             max_tokens=4096,
+            reasoning_effort=_OPENROUTER_CLEANUP_EFFORT,
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"LLM error: {e}")
