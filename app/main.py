@@ -101,6 +101,15 @@ def _openrouter_chat_completion(*, model: str, messages: list[dict], temperature
     resp = openrouter_client.chat.completions.create(**kwargs)
     msg = resp.choices[0].message
     reply_text = getattr(msg, "content", None) or ""
+    # Some OpenAI-compatible providers return content as a list of typed parts
+    # rather than a plain string.
+    if isinstance(reply_text, list):
+        reply_text = "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part)
+            for part in reply_text
+        )
+    if not isinstance(reply_text, str):
+        reply_text = str(reply_text)
     reasoning = (
         getattr(msg, "reasoning", None)
         or getattr(msg, "reasoning_content", None)
@@ -2686,8 +2695,10 @@ def life_memories_propose(x_admin_token: str | None = None):
         raw, _reasoning, _usage = _openrouter_chat_completion(
             model=_cleanup_model,
             messages=[{"role": "user", "content": cleanup_prompt}],
-            max_tokens=4096,
-            reasoning_effort=_OPENROUTER_CLEANUP_EFFORT,
+            # Reserve enough output budget for the complete JSON proposal. A
+            # high reasoning setting can consume the entire smaller budget.
+            max_tokens=8192,
+            reasoning_effort=os.getenv("OPENROUTER_CLEANUP_REASONING", "medium"),
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"LLM error: {e}")
@@ -2699,12 +2710,25 @@ def life_memories_propose(x_admin_token: str | None = None):
         raw = re.sub(r"```$", "", raw).strip()
 
     if not raw:
+        # Retry without reasoning. This handles providers that return only a
+        # reasoning channel when the reasoning budget is exhausted.
+        try:
+            raw, _reasoning, _usage = _openrouter_chat_completion(
+                model=_cleanup_model,
+                messages=[{"role": "user", "content": cleanup_prompt}],
+                max_tokens=8192,
+                reasoning_effort=None,
+            )
+            raw = (raw or "").strip()
+        except Exception as retry_error:
+            raise HTTPException(status_code=502, detail=f"LLM retry error: {retry_error}")
+
+    if not raw:
         raise HTTPException(
             status_code=502,
             detail=(
-                f"LLM ({_cleanup_model}) returned an empty response. "
-                "This can happen with reasoning models when `content` is None. "
-                "Check that the model name is correct and the API key has access."
+                f"LLM ({_cleanup_model}) returned an empty response after retry. "
+                "The model may not have access to the requested output format."
             ),
         )
 
