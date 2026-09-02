@@ -67,10 +67,10 @@ _OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/a
 _OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-5.6-luna")
 # Reasoning effort per task ("low" | "medium" | "high"). Chat defaults to low for
 # snappy replies; memory extraction defaults to high for better judgment.
-_OPENROUTER_CHAT_EFFORT = os.getenv("OPENROUTER_CHAT_REASONING", "low")
+_OPENROUTER_CHAT_EFFORT = os.getenv("OPENROUTER_CHAT_REASONING", "high")
 _OPENROUTER_MEMORY_EFFORT = os.getenv("OPENROUTER_MEMORY_REASONING", "high")
 _OPENROUTER_TAG_EFFORT = os.getenv("OPENROUTER_TAG_REASONING", "low")
-_OPENROUTER_CLEANUP_EFFORT = os.getenv("OPENROUTER_CLEANUP_REASONING", "medium")
+_OPENROUTER_CLEANUP_EFFORT = os.getenv("OPENROUTER_CLEANUP_REASONING", "high")
 _OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "openai/text-embedding-3-small")
 openrouter_client = OpenAI(
     api_key=os.getenv("OPENROUTER_API_KEY"),
@@ -91,12 +91,25 @@ def _openrouter_chat_completion(*, model: str, messages: list[dict], temperature
     if max_tokens is not None:
         kwargs["max_tokens"] = max_tokens
     if reasoning_effort is not None:
-        kwargs["reasoning"] = {"effort": reasoning_effort}
+        # OpenRouter's `reasoning` param isn't a known kwarg in older OpenAI SDK
+        # versions, so send it through the raw request body instead.
+        # Ask OpenRouter to retain reasoning in the response.  It is returned
+        # separately from the assistant content when the selected model/provider
+        # supports reasoning; it is not automatically wrapped in <think> tags.
+        kwargs["extra_body"] = {"reasoning": {"effort": reasoning_effort, "exclude": False}}
 
     resp = openrouter_client.chat.completions.create(**kwargs)
     msg = resp.choices[0].message
-    reply_text = getattr(msg, "content", None) or getattr(msg, "reasoning_content", None) or ""
-    return reply_text, getattr(resp, "usage", None)
+    reply_text = getattr(msg, "content", None) or ""
+    reasoning = (
+        getattr(msg, "reasoning", None)
+        or getattr(msg, "reasoning_content", None)
+        or getattr(msg, "analysis", None)
+        or ""
+    )
+    if not isinstance(reasoning, str):
+        reasoning = json.dumps(reasoning, ensure_ascii=False)
+    return reply_text, reasoning, getattr(resp, "usage", None)
 
 
 def _openai_embeddings(*, input_texts: list[str]):
@@ -1288,7 +1301,7 @@ def _summarize_conversation(session_history: list, user_name: str = "User") -> s
             LAST_NEW_CHAT_DEBUG["llm_call_1"] = "started"
         
         # Use a generous output budget for memory extraction.
-        summary, usage = _openrouter_chat_completion(
+        summary, _reasoning, usage = _openrouter_chat_completion(
             model=_OPENROUTER_MODEL,
             messages=[{"role": "user", "content": summary_prompt}],
             max_tokens=4096,
@@ -1511,7 +1524,7 @@ def _get_tags_for_candidates(candidate_lines: list[str]) -> dict:
         for ln in candidate_lines:
             prompt += f"- {ln}\n"
 
-        summary, usage = _openrouter_chat_completion(
+        summary, _reasoning, usage = _openrouter_chat_completion(
             model=_OPENROUTER_MODEL,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=512,
@@ -2114,8 +2127,9 @@ def chat(data: ChatIn):
             model = _OPENROUTER_MODEL
 
         reply = ""
+        reasoning = ""
         if True:
-            reply, usage = _openrouter_chat_completion(model=model, messages=messages, reasoning_effort=_OPENROUTER_CHAT_EFFORT)
+            reply, reasoning, usage = _openrouter_chat_completion(model=model, messages=messages, reasoning_effort=_OPENROUTER_CHAT_EFFORT)
 
             input_t = None
             output_t = None
@@ -2146,7 +2160,7 @@ def chat(data: ChatIn):
             })
         else:
             # Compatibility fallback: all chat requests still use OpenRouter.
-            reply, usage = _openrouter_chat_completion(model=_OPENROUTER_MODEL, messages=messages, reasoning_effort=_OPENROUTER_CHAT_EFFORT)
+            reply, reasoning, usage = _openrouter_chat_completion(model=_OPENROUTER_MODEL, messages=messages, reasoning_effort=_OPENROUTER_CHAT_EFFORT)
 
             input_t = None
             output_t = None
@@ -2205,7 +2219,7 @@ def chat(data: ChatIn):
         total_output = sum(int(c.get("output_tokens", 0)) for c in token_calls)
         total_all = sum(int(c.get("total_tokens", 0)) for c in token_calls)
 
-        return {
+        response = {
             "reply": reply,
             "tokens": {
                 "calls": token_calls,
@@ -2214,6 +2228,9 @@ def chat(data: ChatIn):
                 "total_tokens": int(total_all),
             },
         }
+        if reasoning:
+            response["reasoning"] = reasoning
+        return response
     except Exception as e:
         return {"error": str(e)}
 
@@ -2666,7 +2683,7 @@ def life_memories_propose(x_admin_token: str | None = None):
 
     try:
         _cleanup_model = _OPENROUTER_MODEL
-        raw, _usage = _openrouter_chat_completion(
+        raw, _reasoning, _usage = _openrouter_chat_completion(
             model=_cleanup_model,
             messages=[{"role": "user", "content": cleanup_prompt}],
             max_tokens=4096,

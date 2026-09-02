@@ -1797,11 +1797,11 @@
             chatContainer.innerHTML = '';
             const chat = currentChatId && chats[currentChatId];
             if (!chat) return;
-            chat.messages.forEach(msg => addMessageToDOM(msg.sender, msg.text));
+            chat.messages.forEach(msg => addMessageToDOM(msg.sender, msg.text, msg.reasoning || ''));
         }
 
         // Add message to DOM only
-        function addMessageToDOM(sender, text) {
+        function addMessageToDOM(sender, text, reasoning = '') {
             const messageDiv = document.createElement('div');
             messageDiv.className = 'message ' + (sender === 'You' ? 'user-message' : 'alex-message');
             
@@ -1810,14 +1810,15 @@
             senderDiv.textContent = sender;
             
             const parsed = splitThinking(text);
-            if (sender === 'Alex' && parsed.thinking && isThinkingVisible()) {
+            const visibleThinking = reasoning || parsed.thinking;
+            if (sender === 'Alex' && visibleThinking && isThinkingVisible()) {
                 const thinkingDiv = document.createElement('div');
                 thinkingDiv.className = 'thinking-block';
                 const thinkingLabel = document.createElement('span');
                 thinkingLabel.className = 'thinking-label';
                 thinkingLabel.textContent = 'Thinking';
                 thinkingDiv.appendChild(thinkingLabel);
-                thinkingDiv.appendChild(document.createTextNode(parsed.thinking));
+                thinkingDiv.appendChild(document.createTextNode(visibleThinking));
                 messageDiv.appendChild(thinkingDiv);
             }
 
@@ -1833,15 +1834,15 @@
         }
 
         // Add message and save to chat history
-        function addMessage(sender, text) {
+        function addMessage(sender, text, reasoning = '') {
             if (!currentChatId || !chats[currentChatId]) return;
             
             // Add to DOM
-            addMessageToDOM(sender, text);
+            addMessageToDOM(sender, text, reasoning);
             
             // Save to chat history
             const chat = chats[currentChatId];
-            chat.messages.push({ sender, text, timestamp: Date.now() });
+            chat.messages.push({ sender, text, ...(reasoning ? { reasoning } : {}), timestamp: Date.now() });
             chat.lastUpdated = Date.now();
             
             // Update title from first user message
@@ -1932,7 +1933,10 @@
                 showTyping(false);
 
                 if (data.reply) {
-                    addMessage('Alex', data.reply);
+                    const reasoning = typeof data.reasoning === 'string' ? data.reasoning.trim() : '';
+                    // Keep reasoning separate so it is displayed when enabled,
+                    // but is not sent back to the model as conversation history.
+                    addMessage('Alex', data.reply, reasoning);
                     // Update token usage UI if provided
                     if (data.tokens) {
                         try {
